@@ -1,0 +1,43 @@
+# Credenciales y secretos
+pull-secret.txt
+pull-secret*.json
+*.pem
+*.key
+
+# Binarios descargados
+bin/
+
+# Datos de clusters desplegados
+clusters/
+
+# Directorio antiguo de terraform
+416/
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+cluster.plan
+terraform.tfvars
+
+# Ignition configs (contienen certificados)
+*.ign
+
+# Kubeconfig y auth
+auth/
+kubeconfig
+kubeadmin-password
+
+# SSH keys
+*.pub
+id_*
+
+# Backups
+*.bak
+
+# OS
+.DS_Store
+*.swp
+*~

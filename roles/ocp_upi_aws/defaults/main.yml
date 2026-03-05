@@ -1,0 +1,36 @@
+---
+ocp_version: "4.16"
+ocp_version_full: ""
+cluster_name: "ocp-cluster"
+base_domain: "example.com"
+aws_region: "eu-west-1"
+aws_profile: ""
+vpc_cidr: "10.0.0.0/16"
+
+ocp_versions:
+  "4.16": "4.16.32"
+  "4.17": "4.17.18"
+  "4.18": "4.18.12"
+  "4.20": "4.20.15"
+
+rhcos_metadata_url: "https://raw.githubusercontent.com/openshift/installer/release-{{ ocp_version }}/data/data/coreos/rhcos.json"
+
+master_instance_type: "m5.xlarge"
+master_count: 3
+worker_instance_type: "m5.large"
+worker_count: 3
+bootstrap_instance_type: "i3.xlarge"
+
+pull_secret_path: "{{ playbook_dir }}/pull-secret.txt"
+ssh_key_name: "ocp-{{ cluster_name }}"
+ssh_key_path: "{{ ansible_env.HOME }}/.ssh/{{ ssh_key_name }}"
+
+bin_dir: "{{ playbook_dir }}/bin/{{ ocp_version }}"
+install_dir: "{{ playbook_dir }}/clusters/{{ cluster_name }}/{{ ocp_version }}/{{ aws_region }}"
+terraform_dir: "{{ install_dir }}/terraform"
+cluster_metadata_file: "{{ install_dir }}/.cluster-metadata.json"
+force_destroy: false
+
+aws_env: "{{ {'AWS_PROFILE': aws_profile, 'AWS_DEFAULT_REGION': aws_region} if aws_profile else {'AWS_DEFAULT_REGION': aws_region} }}"
+
+ocp_mirror_url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp"
