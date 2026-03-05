@@ -20,9 +20,11 @@ Automatización para desplegar clusters OpenShift (UPI) en AWS usando Ansible co
 | Versión | Release completa |
 |---------|-----------------|
 | 4.16    | 4.16.32         |
-| 4.17    | 4.17.18         |
-| 4.18    | 4.18.12         |
+| 4.17    | 4.17.50         |
+| 4.18    | 4.18.34         |
+| 4.19    | 4.19.24         |
 | 4.20    | 4.20.15         |
+| 4.21    | 4.21.4          |
 
 Se pueden añadir nuevas versiones editando `ocp_versions` en `roles/ocp_upi_aws/defaults/main.yml`.
 
