@@ -8,6 +8,7 @@ variable "master_ign_path"    { default = "../ocp/master.ign" }
 variable "worker_ign_path"    { default = "../ocp/worker.ign" }
 
 variable "aws_profile" { default = "" }
+variable "infra_id"    { default = "" }
 
 provider "aws" {
   region  = var.aws_region

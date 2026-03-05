@@ -1,7 +1,47 @@
-# 1. Obtener la Zona Hospedada existente
+# 1. Obtener la Zona Hospedada existente (publica)
 data "aws_route53_zone" "base_zone" {
   name         = "${var.base_domain}."
   private_zone = false
+}
+
+# 1b. Zona privada para DNS interno del cluster
+resource "aws_route53_zone" "private_zone" {
+  name = "${var.cluster_name}.${var.base_domain}"
+
+  vpc {
+    vpc_id = aws_vpc.ocp_vpc.id
+  }
+
+  tags = {
+    Name                                     = "${var.infra_id}-int"
+    "kubernetes.io/cluster/${var.infra_id}"   = "owned"
+  }
+}
+
+# 1c. Registro api-int en zona privada
+resource "aws_route53_record" "api_internal_private" {
+  zone_id = aws_route53_zone.private_zone.zone_id
+  name    = "api-int.${var.cluster_name}.${var.base_domain}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.api_internal.dns_name
+    zone_id                = aws_lb.api_internal.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# 1d. Registro api en zona privada
+resource "aws_route53_record" "api_private" {
+  zone_id = aws_route53_zone.private_zone.zone_id
+  name    = "api.${var.cluster_name}.${var.base_domain}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.api_internal.dns_name
+    zone_id                = aws_lb.api_internal.zone_id
+    evaluate_target_health = true
+  }
 }
 
 # 2. Registro para API Externa

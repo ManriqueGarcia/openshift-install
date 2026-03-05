@@ -353,11 +353,52 @@
     creates: "{{ install_dir }}/ocp/manifests"
   environment: "{{ aws_env }}"
 
+- name: Extraer infra ID del cluster desde manifiestos
+  ansible.builtin.shell:
+    cmd: "grep -r 'infrastructureName' {{ install_dir }}/ocp/manifests/ | head -1 | grep -oP 'infrastructureName:\\s*\\K\\S+'"
+  register: infra_id_result
+  changed_when: false
+
+- name: Registrar infra ID
+  ansible.builtin.set_fact:
+    infra_id: "{{ infra_id_result.stdout }}"
+
+- name: Mostrar infra ID
+  ansible.builtin.debug:
+    msg: "Infra ID del cluster: {{ infra_id }}"
+
 - name: Configurar masters como no schedulable
   ansible.builtin.lineinfile:
     path: "{{ install_dir }}/ocp/manifests/cluster-scheduler-02-config.yml"
     regexp: "mastersSchedulable"
     line: "  mastersSchedulable: false"
+
+- name: Buscar manifiesto de ControlPlaneMachineSet
+  ansible.builtin.find:
+    paths: "{{ install_dir }}/ocp/manifests"
+    patterns: "*control-plane-machine-set*"
+  register: cpms_manifest
+
+- name: Desactivar ControlPlaneMachineSet en manifiesto (UPI)
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: 'state:\s*Active'
+    replace: 'state: Inactive'
+  loop: "{{ cpms_manifest.files }}"
+  when: cpms_manifest.matched > 0
+
+- name: "AVISO UPI - ControlPlaneMachineSet = Inactive"
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "  ControlPlaneMachineSet -> Inactive"
+      - "=========================================="
+      - "  En instalaciones UPI no hay Machine API gestionando"
+      - "  los masters. Se ha configurado el CPMS como Inactive"
+      - "  en los manifiestos para que no bloquee la instalacion."
+      - "  Esto es normal y esperado en UPI."
+      - "=========================================="
+  when: cpms_manifest.matched > 0
 
 - name: Generar ignition configs
   ansible.builtin.command:
