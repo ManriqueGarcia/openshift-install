@@ -48,10 +48,27 @@ ansible-playbook playbook.yml \
 | `cluster_name`  | Sí          | `ocp-cluster`  | Nombre del cluster (usado en recursos AWS)        |
 | `base_domain`   | Sí          | `example.com`  | Dominio base (debe existir como zona en Route53)  |
 | `ocp_version`   | No          | `4.16`         | Versión mayor de OpenShift                        |
+| `ocp_version_full` | No       | (auto)         | Release específica (ej: `4.16.20`). Si no se indica, usa la última configurada |
 | `aws_region`    | No          | `eu-west-1`    | Región AWS donde desplegar                        |
 | `aws_profile`   | No          | (vacío)        | Perfil de AWS CLI a usar                          |
 | `vpc_cidr`      | No          | `10.0.0.0/16`  | CIDR de la VPC                                    |
 | `force_destroy`  | No          | `false`        | Forzar destrucción de infraestructura existente   |
+
+### Usar una release específica
+
+Por defecto se usa la última release configurada para cada versión mayor. Para instalar una release concreta, pasa `ocp_version_full`:
+
+```bash
+ansible-playbook playbook.yml \
+  -e cluster_name=mi-cluster \
+  -e base_domain=mi-dominio.com \
+  -e ocp_version=4.16 \
+  -e ocp_version_full=4.16.20 \
+  -e aws_region=eu-west-1 \
+  -e aws_profile=mi-perfil
+```
+
+> **Nota:** Es necesario seguir indicando `ocp_version` (versión mayor) porque se usa para obtener la AMI de RHCOS y para organizar los directorios de binarios y clusters.
 
 ### Ejemplo: dos clusters en paralelo
 
