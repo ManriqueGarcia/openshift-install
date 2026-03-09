@@ -98,3 +98,23 @@ resource "aws_lb_target_group" "ingress_443" {
   vpc_id   = aws_vpc.ocp_vpc.id
   target_type = "ip"
 }
+
+resource "aws_lb_listener" "ingress_80" {
+  load_balancer_arn = aws_lb.ingress.arn
+  port              = 80
+  protocol          = "TCP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.ingress_80.arn
+  }
+}
+
+resource "aws_lb_listener" "ingress_443" {
+  load_balancer_arn = aws_lb.ingress.arn
+  port              = 443
+  protocol          = "TCP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.ingress_443.arn
+  }
+}

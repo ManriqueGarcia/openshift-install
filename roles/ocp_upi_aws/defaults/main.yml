@@ -36,3 +36,6 @@ force_destroy: false
 aws_env: "{{ {'AWS_PROFILE': aws_profile, 'AWS_DEFAULT_REGION': aws_region} if aws_profile else {'AWS_DEFAULT_REGION': aws_region} }}"
 
 ocp_mirror_url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp"
+
+terraform_version: "1.5.7"
+terraform_url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"

@@ -109,7 +109,7 @@
 
 - name: Verificar recursos en terraform state existente
   ansible.builtin.command:
-    cmd: terraform state list
+    cmd: "{{ bin_dir }}/terraform state list"
     chdir: "{{ terraform_dir }}"
   register: tf_state_list
   changed_when: false
@@ -301,6 +301,43 @@
     cmd: "{{ bin_dir }}/oc version --client"
   changed_when: false
 
+- name: Comprobar si terraform ya existe
+  ansible.builtin.stat:
+    path: "{{ bin_dir }}/terraform"
+  register: terraform_stat
+
+- name: Crear directorio temporal para terraform
+  ansible.builtin.tempfile:
+    state: directory
+  register: terraform_tmpdir
+  when: not terraform_stat.stat.exists
+
+- name: Descargar terraform {{ terraform_version }}
+  ansible.builtin.get_url:
+    url: "{{ terraform_url }}"
+    dest: "{{ terraform_tmpdir.path }}/terraform.zip"
+    mode: "0644"
+  when: not terraform_stat.stat.exists
+
+- name: Descomprimir terraform en {{ bin_dir }}
+  ansible.builtin.unarchive:
+    src: "{{ terraform_tmpdir.path }}/terraform.zip"
+    dest: "{{ bin_dir }}"
+    remote_src: true
+    mode: "0755"
+  when: not terraform_stat.stat.exists
+
+- name: Eliminar directorio temporal de terraform
+  ansible.builtin.file:
+    path: "{{ terraform_tmpdir.path }}"
+    state: absent
+  when: not terraform_stat.stat.exists
+
+- name: Verificar terraform
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/terraform version"
+  changed_when: false
+
 # === FASE 8: Generar SSH key ===
 
 - name: Comprobar si existe la clave SSH
@@ -309,10 +346,14 @@
   register: ssh_key_stat
 
 - name: Generar clave SSH para el cluster
-  community.crypto.openssh_keypair:
+  ansible.builtin.command:
+    cmd: ssh-keygen -t ed25519 -C "ocp-{{ cluster_name }}" -f "{{ ssh_key_path }}" -N ""
+    creates: "{{ ssh_key_path }}"
+  when: not ssh_key_stat.stat.exists
+
+- name: Asegurar permisos de la clave SSH privada
+  ansible.builtin.file:
     path: "{{ ssh_key_path }}"
-    type: ed25519
-    comment: "ocp-{{ cluster_name }}"
     mode: "0600"
   when: not ssh_key_stat.stat.exists
 
@@ -406,6 +447,41 @@
     creates: "{{ install_dir }}/ocp/bootstrap.ign"
   environment: "{{ aws_env }}"
 
+- name: Extraer master.ign y worker.ign del state file
+  ansible.builtin.shell: |
+    python3 -c "
+    import json, base64, os
+    state_file = '{{ install_dir }}/ocp/.openshift_install_state.json'
+    ocp_dir = '{{ install_dir }}/ocp'
+    with open(state_file) as f:
+        state = json.load(f)
+    for key, filename in [('*machine.Master', 'master.ign'), ('*machine.Worker', 'worker.ign')]:
+        data = base64.b64decode(state[key]['File']['Data']).decode('utf-8')
+        path = os.path.join(ocp_dir, filename)
+        with open(path, 'w') as f:
+            f.write(data)
+        print(f'{filename}: {len(data)} bytes')
+    "
+  args:
+    creates: "{{ install_dir }}/ocp/master.ign"
+
+- name: Verificar que existen los ficheros ignition
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/ocp/{{ item }}"
+  register: ign_check
+  loop:
+    - bootstrap.ign
+    - master.ign
+    - worker.ign
+
+- name: Fallar si falta algun fichero ignition
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.size > 0
+    fail_msg: "Fichero ignition no encontrado o vacio: {{ item.item }}"
+  loop: "{{ ign_check.results }}"
+
 # === FASE 10: Terraform ===
 
 - name: Copiar ficheros de terraform
@@ -420,22 +496,16 @@
     dest: "{{ terraform_dir }}/terraform.tfvars"
     mode: "0640"
 
-- name: Actualizar ruta de bootstrap.ign en s3.tf
-  ansible.builtin.replace:
-    path: "{{ terraform_dir }}/s3.tf"
-    regexp: 'source\s*=\s*"[^"]*bootstrap\.ign"'
-    replace: 'source = "{{ install_dir }}/ocp/bootstrap.ign"'
-
 - name: Terraform init
   ansible.builtin.command:
-    cmd: terraform init
+    cmd: "{{ bin_dir }}/terraform init"
     chdir: "{{ terraform_dir }}"
   environment: "{{ aws_env }}"
   changed_when: false
 
 - name: Terraform plan
   ansible.builtin.command:
-    cmd: terraform plan -out=cluster.plan
+    cmd: "{{ bin_dir }}/terraform plan -out=cluster.plan"
     chdir: "{{ terraform_dir }}"
   environment: "{{ aws_env }}"
   register: tf_plan
@@ -446,7 +516,7 @@
 
 - name: Terraform apply
   ansible.builtin.command:
-    cmd: terraform apply -auto-approve cluster.plan
+    cmd: "{{ bin_dir }}/terraform apply -auto-approve cluster.plan"
     chdir: "{{ terraform_dir }}"
   environment: "{{ aws_env }}"
   register: tf_apply
