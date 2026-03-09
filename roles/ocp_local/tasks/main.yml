@@ -1,0 +1,242 @@
+---
+# === FASE 1: Validaciones previas ===
+
+- name: Resolver version completa de OCP {{ ocp_version }}
+  ansible.builtin.set_fact:
+    ocp_version_full: "{{ ocp_versions[ocp_version] }}"
+
+- name: Mostrar resumen del despliegue local
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "  DESPLIEGUE OPENSHIFT LOCAL (CRC)"
+      - "=========================================="
+      - "  Version:  {{ ocp_version }} ({{ ocp_version_full }})"
+      - "  CPUs:     {{ crc_cpus }}"
+      - "  Memoria:  {{ crc_memory }} MiB"
+      - "  Disco:    {{ crc_disk }} GiB"
+      - "  Preset:   {{ crc_preset }}"
+      - "=========================================="
+
+- name: Validar recursos minimos del sistema
+  ansible.builtin.assert:
+    that:
+      - ansible_memtotal_mb >= (crc_memory | int + 2048)
+      - ansible_processor_vcpus >= (crc_cpus | int)
+    fail_msg: >
+      Recursos insuficientes. Se necesitan al menos {{ crc_cpus }} CPUs
+      y {{ (crc_memory | int + 2048) }} MiB de RAM total.
+      Disponible: {{ ansible_processor_vcpus }} CPUs, {{ ansible_memtotal_mb }} MiB RAM.
+
+- name: Validar espacio en disco
+  ansible.builtin.shell:
+    cmd: df --output=avail -BG / | tail -1 | tr -d ' G'
+  register: disk_avail
+  changed_when: false
+
+- name: Verificar espacio en disco suficiente
+  ansible.builtin.assert:
+    that:
+      - (disk_avail.stdout | int) >= (crc_disk | int + 10)
+    fail_msg: >
+      Espacio en disco insuficiente. Se necesitan al menos {{ crc_disk | int + 10 }} GiB.
+      Disponible: {{ disk_avail.stdout }} GiB.
+
+- name: Validar que el pull secret existe
+  ansible.builtin.stat:
+    path: "{{ pull_secret_path }}"
+  register: pull_secret_stat
+
+- name: Verificar fichero de pull secret
+  ansible.builtin.assert:
+    that:
+      - pull_secret_stat.stat.exists
+    fail_msg: >
+      No se encontro el pull secret en {{ pull_secret_path }}.
+      Descargalo desde https://console.redhat.com/openshift/install/pull-secret
+      y guardalo como {{ pull_secret_path }}
+
+- name: Verificar que libvirt esta instalado
+  ansible.builtin.command:
+    cmd: virsh --version
+  register: libvirt_check
+  changed_when: false
+  ignore_errors: true
+
+- name: Instalar dependencias de virtualizacion si es necesario
+  ansible.builtin.debug:
+    msg: >
+      AVISO: libvirt no detectado. CRC lo instalara automaticamente durante 'crc setup',
+      pero puede requerir permisos de sudo.
+  when: libvirt_check.rc != 0
+
+# === FASE 2: Descargar CRC ===
+
+- name: Crear directorio de binarios CRC
+  ansible.builtin.file:
+    path: "{{ crc_bin_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Comprobar si CRC ya esta descargado
+  ansible.builtin.stat:
+    path: "{{ crc_binary }}"
+  register: crc_stat
+
+- name: Crear directorio temporal para descarga
+  ansible.builtin.tempfile:
+    state: directory
+  register: crc_tmpdir
+  when: not crc_stat.stat.exists
+
+- name: Descargar CRC {{ crc_version }}
+  ansible.builtin.get_url:
+    url: "{{ crc_url }}"
+    dest: "{{ crc_tmpdir.path }}/crc.tar.xz"
+    mode: "0644"
+  when: not crc_stat.stat.exists
+
+- name: Descomprimir CRC
+  ansible.builtin.shell:
+    cmd: "tar xf {{ crc_tmpdir.path }}/crc.tar.xz -C {{ crc_tmpdir.path }} --strip-components=1"
+  when: not crc_stat.stat.exists
+
+- name: Copiar binario CRC a {{ crc_bin_dir }}
+  ansible.builtin.copy:
+    src: "{{ crc_tmpdir.path }}/crc"
+    dest: "{{ crc_binary }}"
+    mode: "0755"
+    remote_src: true
+  when: not crc_stat.stat.exists
+
+- name: Eliminar directorio temporal
+  ansible.builtin.file:
+    path: "{{ crc_tmpdir.path }}"
+    state: absent
+  when: not crc_stat.stat.exists
+
+- name: Verificar version de CRC
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} version"
+  changed_when: false
+  register: crc_version_output
+
+- name: Mostrar version de CRC
+  ansible.builtin.debug:
+    msg: "{{ crc_version_output.stdout }}"
+
+# === FASE 3: Configurar CRC ===
+
+- name: Ejecutar crc setup (puede tardar varios minutos)
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} setup"
+  register: crc_setup
+  changed_when: "'Setting up' in crc_setup.stdout"
+
+- name: Mostrar resultado de crc setup
+  ansible.builtin.debug:
+    var: crc_setup.stdout_lines
+
+- name: Configurar preset
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} config set preset {{ crc_preset }}"
+  changed_when: false
+
+- name: Configurar CPUs minimas ({{ crc_cpus }})
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} config set cpus {{ crc_cpus }}"
+  changed_when: false
+
+- name: Configurar memoria minima ({{ crc_memory }} MiB)
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} config set memory {{ crc_memory }}"
+  changed_when: false
+
+- name: Configurar disco ({{ crc_disk }} GiB)
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} config set disk-size {{ crc_disk }}"
+  changed_when: false
+
+- name: Desactivar cluster monitoring (ahorra recursos)
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} config set enable-cluster-monitoring {{ crc_enable_cluster_monitoring | lower }}"
+  changed_when: false
+
+- name: Desactivar telemetria
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} config set consent-telemetry no"
+  changed_when: false
+
+# === FASE 4: Arrancar el cluster ===
+
+- name: Comprobar si el cluster ya esta arrancado
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} status"
+  register: crc_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Arrancar CRC con OpenShift {{ ocp_version }} (puede tardar 10-15 minutos)
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} start --pull-secret-file {{ pull_secret_path }}"
+  register: crc_start
+  when: >
+    crc_status.rc != 0 or
+    'Running' not in (crc_status.stdout | default(''))
+  async: 1800
+  poll: 30
+
+- name: Mostrar resultado del arranque
+  ansible.builtin.debug:
+    var: crc_start.stdout_lines
+  when: crc_start is changed
+
+# === FASE 5: Verificar y mostrar acceso ===
+
+- name: Obtener estado final del cluster
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} status"
+  register: crc_final_status
+  changed_when: false
+
+- name: Obtener IP del cluster
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} ip"
+  register: crc_ip
+  changed_when: false
+
+- name: Obtener credenciales de acceso
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} console --credentials"
+  register: crc_credentials
+  changed_when: false
+
+- name: "RESULTADO FINAL - OpenShift Local {{ ocp_version }}"
+  ansible.builtin.debug:
+    msg:
+      - "============================================================"
+      - "  CLUSTER OPENSHIFT LOCAL INSTALADO"
+      - "============================================================"
+      - "  Version:    {{ ocp_version }} ({{ ocp_version_full }})"
+      - "  CPUs:       {{ crc_cpus }}"
+      - "  Memoria:    {{ crc_memory }} MiB"
+      - "  Disco:      {{ crc_disk }} GiB"
+      - "  IP:         {{ crc_ip.stdout }}"
+      - "============================================================"
+      - ""
+      - "  ESTADO:"
+      - "{{ crc_final_status.stdout }}"
+      - ""
+      - "  CREDENCIALES:"
+      - "{{ crc_credentials.stdout }}"
+      - ""
+      - "============================================================"
+      - "  COMANDOS UTILES"
+      - "============================================================"
+      - "  Configurar oc:    eval $({{ crc_binary }} oc-env)"
+      - "  Abrir consola:    {{ crc_binary }} console"
+      - "  Parar cluster:    {{ crc_binary }} stop"
+      - "  Arrancar cluster: {{ crc_binary }} start"
+      - "  Eliminar cluster: {{ crc_binary }} delete"
+      - "  Estado:           {{ crc_binary }} status"
+      - "============================================================"
