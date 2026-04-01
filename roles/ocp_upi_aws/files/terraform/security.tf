@@ -88,6 +88,16 @@ resource "aws_security_group_rule" "worker_https" {
   security_group_id = aws_security_group.worker_sg.id
 }
 
+resource "aws_security_group_rule" "worker_nodeports" {
+  type              = "ingress"
+  description       = "NodePort (router/default ingress LoadBalancerService)"
+  from_port         = 30000
+  to_port           = 32767
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.worker_sg.id
+}
+
 resource "aws_security_group_rule" "worker_egress" {
   type              = "egress"
   from_port         = 0

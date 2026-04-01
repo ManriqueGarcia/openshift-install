@@ -1,0 +1,13 @@
+apiVersion: operator.openshift.io/v1
+kind: IngressController
+metadata:
+  name: default
+  namespace: openshift-ingress-operator
+spec:
+  routeAdmission:
+    wildcardPolicy: WildcardsAllowed
+  endpointPublishingStrategy:
+    type: NodePortService
+    nodePort:
+      httpPort: {{ ingress_nodeport_http | default(30080) }}
+      httpsPort: {{ ingress_nodeport_https | default(30443) }}

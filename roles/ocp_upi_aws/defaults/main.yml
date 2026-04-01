@@ -28,6 +28,9 @@ root_volume_size: 120
 root_volume_type: "gp3"
 
 # Network & security
+# Deben coincidir con variables Terraform ingress_nodeport_* (NLB -> router NodePort).
+ingress_nodeport_http: 30080
+ingress_nodeport_https: 30443
 enable_dual_nic: false
 allowed_ssh_cidrs: []
 allowed_api_cidrs:

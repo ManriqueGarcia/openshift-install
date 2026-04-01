@@ -49,7 +49,7 @@ resource "aws_instance" "master" {
   ami                    = var.rhcos_ami
   instance_type          = var.master_instance_type
   iam_instance_profile   = aws_iam_instance_profile.master_profile.name
-  subnet_id              = aws_subnet.private_subnets[count.index].id
+  subnet_id = aws_subnet.private_subnets[count.index % length(aws_subnet.private_subnets)].id
   vpc_security_group_ids = [aws_security_group.master_sg.id]
 
   root_block_device {
@@ -91,7 +91,7 @@ resource "aws_instance" "worker" {
   ami                    = var.rhcos_ami
   instance_type          = var.worker_instance_type
   iam_instance_profile   = aws_iam_instance_profile.worker_profile.name
-  subnet_id              = aws_subnet.private_subnets[count.index].id
+  subnet_id              = aws_subnet.private_subnets[count.index % length(aws_subnet.private_subnets)].id
   vpc_security_group_ids = [aws_security_group.worker_sg.id]
 
   root_block_device {
@@ -130,7 +130,7 @@ resource "aws_instance" "worker" {
 # --- 4. SEGUNDO ENI (dual-NIC) ---
 resource "aws_network_interface" "master_secondary" {
   count           = var.enable_dual_nic ? var.master_count : 0
-  subnet_id       = aws_subnet.secondary_private_subnets[count.index].id
+  subnet_id       = aws_subnet.secondary_private_subnets[count.index % length(aws_subnet.secondary_private_subnets)].id
   security_groups = [aws_security_group.master_sg.id]
 
   tags = {
@@ -148,7 +148,7 @@ resource "aws_network_interface_attachment" "master_secondary" {
 
 resource "aws_network_interface" "worker_secondary" {
   count           = var.enable_dual_nic ? var.worker_count : 0
-  subnet_id       = aws_subnet.secondary_private_subnets[count.index].id
+  subnet_id       = aws_subnet.secondary_private_subnets[count.index % length(aws_subnet.secondary_private_subnets)].id
   security_groups = [aws_security_group.worker_sg.id]
 
   tags = {
@@ -164,16 +164,16 @@ resource "aws_network_interface_attachment" "worker_secondary" {
   device_index         = 1
 }
 
-# Registrar Workers en el Target Group del Ingress (Router)
-resource "aws_lb_target_group_attachment" "worker_ingress_80" {
+# Workers: NodePorts del IngressController (router) detrás del NLB :80 / :443
+resource "aws_lb_target_group_attachment" "worker_ingress_http_np" {
   count            = var.worker_count
-  target_group_arn = aws_lb_target_group.ingress_80.arn
+  target_group_arn = aws_lb_target_group.ingress_http_np.arn
   target_id        = aws_instance.worker[count.index].private_ip
 }
 
-resource "aws_lb_target_group_attachment" "worker_ingress_443" {
+resource "aws_lb_target_group_attachment" "worker_ingress_https_np" {
   count            = var.worker_count
-  target_group_arn = aws_lb_target_group.ingress_443.arn
+  target_group_arn = aws_lb_target_group.ingress_https_np.arn
   target_id        = aws_instance.worker[count.index].private_ip
 }
 

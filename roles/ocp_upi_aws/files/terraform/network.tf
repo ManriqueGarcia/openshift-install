@@ -1,12 +1,24 @@
 data "aws_availability_zones" "available" {
   state = "available"
+
+  # Solo AZ regionales; evita Local/Wavelength zones listadas junto a las AZ estándar.
+  filter {
+    name   = "zone-type"
+    values = ["availability-zone"]
+  }
 }
 
 locals {
-  az_names               = slice(data.aws_availability_zones.available.names, 0, 3)
-  public_subnet_cidrs    = [for i in range(3) : cidrsubnet(var.vpc_cidr, 8, 10 + i)]
-  private_subnet_cidrs   = [for i in range(3) : cidrsubnet(var.vpc_cidr, 8, 20 + i)]
-  secondary_subnet_cidrs = [for i in range(3) : cidrsubnet(var.vpc_cidr, 8, 30 + i)]
+  # us-west-1 y otras regiones pueden tener solo 2 AZs; slice(..., 0, 3) falla si hay menos de 3.
+  az_count = min(3, length(data.aws_availability_zones.available.names))
+  az_names = slice(
+    data.aws_availability_zones.available.names,
+    0,
+    local.az_count
+  )
+  public_subnet_cidrs    = [for i in range(local.az_count) : cidrsubnet(var.vpc_cidr, 8, 10 + i)]
+  private_subnet_cidrs   = [for i in range(local.az_count) : cidrsubnet(var.vpc_cidr, 8, 20 + i)]
+  secondary_subnet_cidrs = [for i in range(local.az_count) : cidrsubnet(var.vpc_cidr, 8, 30 + i)]
 }
 
 resource "aws_vpc" "ocp_vpc" {
@@ -27,7 +39,7 @@ resource "aws_internet_gateway" "igw" {
 
 # Subredes públicas
 resource "aws_subnet" "public_subnets" {
-  count                   = 3
+  count                   = local.az_count
   vpc_id                  = aws_vpc.ocp_vpc.id
   cidr_block              = local.public_subnet_cidrs[count.index]
   availability_zone       = local.az_names[count.index]
@@ -42,14 +54,14 @@ resource "aws_subnet" "public_subnets" {
 
 # EIPs para los NAT Gateways
 resource "aws_eip" "nat_eips" {
-  count  = 3
+  count  = local.az_count
   domain = "vpc"
   tags   = { Name = "${var.cluster_name}-eip-${count.index}" }
 }
 
 # NAT Gateways (uno en cada subred pública)
 resource "aws_nat_gateway" "nat_gws" {
-  count         = 3
+  count         = local.az_count
   allocation_id = aws_eip.nat_eips[count.index].id
   subnet_id     = aws_subnet.public_subnets[count.index].id
 
@@ -60,7 +72,7 @@ resource "aws_nat_gateway" "nat_gws" {
 
 # Subredes privadas
 resource "aws_subnet" "private_subnets" {
-  count             = 3
+  count             = local.az_count
   vpc_id            = aws_vpc.ocp_vpc.id
   cidr_block        = local.private_subnet_cidrs[count.index]
   availability_zone = local.az_names[count.index]
@@ -85,14 +97,14 @@ resource "aws_route_table" "public_rt" {
 }
 
 resource "aws_route_table_association" "public_assoc" {
-  count          = 3
+  count          = local.az_count
   subnet_id      = aws_subnet.public_subnets[count.index].id
   route_table_id = aws_route_table.public_rt.id
 }
 
 # Tablas de ruta privadas (una por AZ/NAT GW)
 resource "aws_route_table" "private_rts" {
-  count  = 3
+  count  = local.az_count
   vpc_id = aws_vpc.ocp_vpc.id
 
   route {
@@ -104,14 +116,14 @@ resource "aws_route_table" "private_rts" {
 }
 
 resource "aws_route_table_association" "private_assoc" {
-  count          = 3
+  count          = local.az_count
   subnet_id      = aws_subnet.private_subnets[count.index].id
   route_table_id = aws_route_table.private_rts[count.index].id
 }
 
 # Subredes privadas secundarias (dual-NIC, subred diferente con gateway propio)
 resource "aws_subnet" "secondary_private_subnets" {
-  count             = var.enable_dual_nic ? 3 : 0
+  count             = var.enable_dual_nic ? local.az_count : 0
   vpc_id            = aws_vpc.ocp_vpc.id
   cidr_block        = local.secondary_subnet_cidrs[count.index]
   availability_zone = local.az_names[count.index]
@@ -123,7 +135,7 @@ resource "aws_subnet" "secondary_private_subnets" {
 }
 
 resource "aws_route_table_association" "secondary_private_assoc" {
-  count          = var.enable_dual_nic ? 3 : 0
+  count          = var.enable_dual_nic ? local.az_count : 0
   subnet_id      = aws_subnet.secondary_private_subnets[count.index].id
   route_table_id = aws_route_table.private_rts[count.index].id
 }

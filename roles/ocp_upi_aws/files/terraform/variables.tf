@@ -110,6 +110,19 @@ variable "worker_count" {
   description = "Number of worker nodes"
 }
 
+# Deben coincidir con el manifiesto 99-ingress-default-nodeport.yaml.j2 / terraform.tfvars.j2.
+variable "ingress_nodeport_http" {
+  type        = number
+  default     = 30080
+  description = "NodePort HTTP del router (NLB escucha :80 y reenvía aquí)"
+}
+
+variable "ingress_nodeport_https" {
+  type        = number
+  default     = 30443
+  description = "NodePort HTTPS del router (NLB escucha :443 y reenvía aquí)"
+}
+
 variable "root_volume_size" {
   type        = number
   default     = 120

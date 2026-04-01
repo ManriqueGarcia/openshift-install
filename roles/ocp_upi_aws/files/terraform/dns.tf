@@ -70,8 +70,7 @@ resource "aws_route53_record" "api_internal" {
   }
 }
 
-# 4. Registro Comodín (Wildcard) para Aplicaciones (*.apps)
-# Se crea en la zona base
+# *.apps: alias al NLB de ingress (NodePortService en el clúster). Sin LoadBalancerService del operador = sin Route53 minteado en la zona privada.
 resource "aws_route53_record" "apps_wildcard" {
   zone_id = data.aws_route53_zone.base_zone.zone_id
   name    = "*.apps.${var.cluster_name}.${data.aws_route53_zone.base_zone.name}"
@@ -84,7 +83,6 @@ resource "aws_route53_record" "apps_wildcard" {
   }
 }
 
-# 4b. Registro *.apps en la zona privada del cluster
 resource "aws_route53_record" "apps_wildcard_private" {
   zone_id = aws_route53_zone.private_zone.zone_id
   name    = "*.apps.${var.cluster_name}.${var.base_domain}"

@@ -28,18 +28,18 @@
   environment: "{{ aws_env }}"
   register: tf_plan
 
-- name: Mostrar plan de terraform
+- name: Mostrar resumen del plan terraform (ultimas 40 lineas)
   ansible.builtin.debug:
-    var: tf_plan.stdout_lines
+    msg: "{{ (tf_plan.stdout_lines | length > 40) | ternary(tf_plan.stdout_lines[-40:] | join('\n'), tf_plan.stdout | default('') | trim) }}"
 
 - name: Terraform apply
   ansible.builtin.command:
-    cmd: "{{ bin_dir }}/terraform apply -auto-approve cluster.plan"
+    cmd: "{{ bin_dir }}/terraform apply -no-color -auto-approve cluster.plan"
     chdir: "{{ terraform_dir }}"
   environment: "{{ aws_env }}"
   register: tf_apply
   changed_when: "'Apply complete' in tf_apply.stdout"
 
-- name: Mostrar resultado de terraform
+- name: Mostrar resultado de terraform (ultimas 50 lineas)
   ansible.builtin.debug:
-    var: tf_apply.stdout_lines
+    msg: "{{ (tf_apply.stdout_lines | length > 50) | ternary(tf_apply.stdout_lines[-50:] | join('\n'), tf_apply.stdout | default('') | trim) }}"

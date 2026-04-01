@@ -81,6 +81,14 @@
     msg: "ControlPlaneMachineSet configurado como Inactive (normal en UPI)"
   when: cpms_manifest.matched > 0
 
+# Ingress por NodePort: el NLB (Terraform) envía :80/:443 a los NodePorts en workers; *.apps en Route53 apunta al NLB.
+# Evita LoadBalancerService + DNS en zona privada (DNSReady=False) y connection refused al router.
+- name: Inyectar IngressController default NodePort (UPI AWS)
+  ansible.builtin.template:
+    src: 99-ingress-default-nodeport.yaml.j2
+    dest: "{{ install_dir }}/ocp/openshift/99-ingress-default-nodeport.yaml"
+    mode: "0644"
+
 # === Dual-NIC: NMState OVS bridge config ===
 
 - name: Generar fichero NMState para OVS bridge
@@ -119,38 +127,44 @@
     creates: "{{ install_dir }}/ocp/bootstrap.ign"
   environment: "{{ aws_env }}"
 
-- name: Comprobar si master.ign y worker.ign ya existen
-  ansible.builtin.stat:
-    path: "{{ install_dir }}/ocp/{{ item }}"
-  register: ign_extracted_check
-  loop:
-    - master.ign
-    - worker.ign
-
-- name: Extraer master.ign y worker.ign del state file
+- name: Extraer master.ign y worker.ign del state file (4.x; claves *machine.Master / *machine.Worker)
   ansible.builtin.shell: |
     python3 -c "
     import json, base64, os, sys
     state_file = '{{ install_dir }}/ocp/.openshift_install_state.json'
     ocp_dir = '{{ install_dir }}/ocp'
+    def find_key(state, suffix):
+        for k in state:
+            if k.endswith(suffix):
+                return k
+        return None
     try:
         with open(state_file) as f:
             state = json.load(f)
-        for key, filename in [('*machine.Master', 'master.ign'), ('*machine.Worker', 'worker.ign')]:
-            if key not in state:
-                matching = [k for k in state if 'Master' in k or 'Worker' in k]
-                print(f'WARNING: key {key} not found. Available keys containing Master/Worker: {matching}', file=sys.stderr)
+        for suffix, filename in [('machine.Master', 'master.ign'), ('machine.Worker', 'worker.ign')]:
+            key = find_key(state, suffix)
+            if not key:
+                print('ERROR: no hay clave que termine en %r. Claves en state: %s' % (suffix, sorted(state.keys())), file=sys.stderr)
                 sys.exit(1)
-            data = base64.b64decode(state[key]['File']['Data']).decode('utf-8')
+            asset = state[key]
+            fmeta = asset.get('File')
+            if not fmeta or 'Data' not in fmeta:
+                print('ERROR: %s no tiene File.Data' % key, file=sys.stderr)
+                sys.exit(1)
+            raw = fmeta['Data']
+            if isinstance(raw, str):
+                data = base64.b64decode(raw).decode('utf-8')
+            else:
+                data = base64.b64decode(bytes(raw)).decode('utf-8')
             path = os.path.join(ocp_dir, filename)
-            with open(path, 'w') as f:
-                f.write(data)
-            print(f'{filename}: {len(data)} bytes')
+            with open(path, 'w') as out:
+                out.write(data)
+            print('%s <= %s (%d bytes)' % (filename, key, len(data)))
     except Exception as e:
-        print(f'ERROR extracting ignition: {e}', file=sys.stderr)
+        print('ERROR extracting ignition: %s' % e, file=sys.stderr)
         sys.exit(1)
     "
-  when: ign_extracted_check.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+  register: ign_extract_shell
 
 - name: Verificar que existen los ficheros ignition
   ansible.builtin.stat:
