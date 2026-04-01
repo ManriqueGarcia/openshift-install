@@ -1,0 +1,170 @@
+---
+# === FASE 9: Generar install-config e ignition ===
+
+- name: Leer pull secret
+  ansible.builtin.slurp:
+    src: "{{ pull_secret_path }}"
+  register: pull_secret_content
+  no_log: true
+
+- name: Crear directorio de instalacion OCP
+  ansible.builtin.file:
+    path: "{{ install_dir }}/ocp"
+    state: directory
+    mode: "0700"
+
+- name: Generar install-config.yaml
+  ansible.builtin.template:
+    src: install-config.yaml.j2
+    dest: "{{ install_dir }}/ocp/install-config.yaml"
+    mode: "0640"
+  no_log: true
+
+- name: Comprobar si existe backup de install-config
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/install-config.yaml.bak"
+  register: install_config_bak_stat
+
+- name: Guardar copia de install-config.yaml
+  ansible.builtin.copy:
+    src: "{{ install_dir }}/ocp/install-config.yaml"
+    dest: "{{ install_dir }}/install-config.yaml.bak"
+    mode: "0640"
+    remote_src: true
+  when: not install_config_bak_stat.stat.exists
+  no_log: true
+
+- name: Generar manifiestos
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/openshift-install create manifests --dir={{ install_dir }}/ocp"
+    creates: "{{ install_dir }}/ocp/manifests"
+  environment: "{{ aws_env }}"
+
+- name: Extraer infra ID del cluster desde manifiestos
+  ansible.builtin.shell:
+    cmd: "grep -r 'infrastructureName' {{ install_dir }}/ocp/manifests/ | head -1 | grep -oP 'infrastructureName:\\s*\\K\\S+'"
+  register: infra_id_result
+  changed_when: false
+
+- name: Registrar infra ID
+  ansible.builtin.set_fact:
+    infra_id: "{{ infra_id_result.stdout }}"
+
+- name: Mostrar infra ID
+  ansible.builtin.debug:
+    msg: "Infra ID del cluster: {{ infra_id }}"
+
+- name: Configurar masters como no schedulable
+  ansible.builtin.lineinfile:
+    path: "{{ install_dir }}/ocp/manifests/cluster-scheduler-02-config.yml"
+    regexp: "mastersSchedulable"
+    line: "  mastersSchedulable: false"
+
+- name: Buscar manifiesto de ControlPlaneMachineSet
+  ansible.builtin.find:
+    paths:
+      - "{{ install_dir }}/ocp/manifests"
+      - "{{ install_dir }}/ocp/openshift"
+    patterns: "*control-plane-machine-set*"
+  register: cpms_manifest
+
+- name: Desactivar ControlPlaneMachineSet en manifiesto (UPI)
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: 'state:\s*Active'
+    replace: 'state: Inactive'
+  loop: "{{ cpms_manifest.files }}"
+  when: cpms_manifest.matched > 0
+
+- name: "AVISO UPI - ControlPlaneMachineSet = Inactive"
+  ansible.builtin.debug:
+    msg: "ControlPlaneMachineSet configurado como Inactive (normal en UPI)"
+  when: cpms_manifest.matched > 0
+
+# === Dual-NIC: NMState OVS bridge config ===
+
+- name: Generar fichero NMState para OVS bridge
+  ansible.builtin.template:
+    src: nmstate-br-ex.yml.j2
+    dest: "{{ install_dir }}/ocp/nmstate-br-ex.yml"
+    mode: "0644"
+  when: enable_dual_nic | default(false) | bool
+
+- name: Codificar NMState config en base64
+  ansible.builtin.slurp:
+    src: "{{ install_dir }}/ocp/nmstate-br-ex.yml"
+  register: nmstate_config_raw
+  when: enable_dual_nic | default(false) | bool
+
+- name: Registrar NMState base64
+  ansible.builtin.set_fact:
+    nmstate_config_b64: "{{ nmstate_config_raw.content }}"
+  when: enable_dual_nic | default(false) | bool
+
+- name: Inyectar MachineConfig NMState para OVS bridge (master + worker)
+  ansible.builtin.template:
+    src: 99-nmstate-br-ex.yaml.j2
+    dest: "{{ install_dir }}/ocp/openshift/99-nmstate-br-ex.yaml"
+    mode: "0644"
+  when: enable_dual_nic | default(false) | bool
+
+- name: "AVISO Dual-NIC - OVS bridge configurado"
+  ansible.builtin.debug:
+    msg: "Dual-NIC: ens5 -> br-ex (metric 48), ens6 -> secondary (metric 101)"
+  when: enable_dual_nic | default(false) | bool
+
+- name: Generar ignition configs
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/openshift-install create ignition-configs --dir={{ install_dir }}/ocp"
+    creates: "{{ install_dir }}/ocp/bootstrap.ign"
+  environment: "{{ aws_env }}"
+
+- name: Comprobar si master.ign y worker.ign ya existen
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/ocp/{{ item }}"
+  register: ign_extracted_check
+  loop:
+    - master.ign
+    - worker.ign
+
+- name: Extraer master.ign y worker.ign del state file
+  ansible.builtin.shell: |
+    python3 -c "
+    import json, base64, os, sys
+    state_file = '{{ install_dir }}/ocp/.openshift_install_state.json'
+    ocp_dir = '{{ install_dir }}/ocp'
+    try:
+        with open(state_file) as f:
+            state = json.load(f)
+        for key, filename in [('*machine.Master', 'master.ign'), ('*machine.Worker', 'worker.ign')]:
+            if key not in state:
+                matching = [k for k in state if 'Master' in k or 'Worker' in k]
+                print(f'WARNING: key {key} not found. Available keys containing Master/Worker: {matching}', file=sys.stderr)
+                sys.exit(1)
+            data = base64.b64decode(state[key]['File']['Data']).decode('utf-8')
+            path = os.path.join(ocp_dir, filename)
+            with open(path, 'w') as f:
+                f.write(data)
+            print(f'{filename}: {len(data)} bytes')
+    except Exception as e:
+        print(f'ERROR extracting ignition: {e}', file=sys.stderr)
+        sys.exit(1)
+    "
+  when: ign_extracted_check.results | selectattr('stat.exists', 'equalto', false) | list | length > 0
+
+- name: Verificar que existen los ficheros ignition
+  ansible.builtin.stat:
+    path: "{{ install_dir }}/ocp/{{ item }}"
+  register: ign_check
+  loop:
+    - bootstrap.ign
+    - master.ign
+    - worker.ign
+
+- name: Fallar si falta algun fichero ignition
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.size > 0
+    fail_msg: "Fichero ignition no encontrado o vacio: {{ item.item }}"
+  loop: "{{ ign_check.results }}"

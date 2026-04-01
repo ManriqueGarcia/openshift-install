@@ -1,0 +1,266 @@
+---
+# === FASE 1: Resumen y validaciones previas ===
+# Acepta ocp_version como X.Y (usa ocp_versions) o X.Y.Z (instala exactamente esa z-stream).
+# La rama del instalador para rhcos.json es siempre release-X.Y.
+
+- name: Resolver versiones OCP (minor, z-stream) y rutas
+  ansible.builtin.set_fact:
+    ocp_version_minor: "{{ _minor }}"
+    ocp_version_full: "{{ _full }}"
+    bin_dir: "{{ playbook_dir }}/bin/{{ _full }}"
+    install_dir: "{{ playbook_dir }}/clusters/{{ cluster_name }}/{{ _full }}/{{ aws_region }}"
+    terraform_dir: "{{ playbook_dir }}/clusters/{{ cluster_name }}/{{ _full }}/{{ aws_region }}/terraform"
+    cluster_metadata_file: "{{ playbook_dir }}/clusters/{{ cluster_name }}/{{ _full }}/{{ aws_region }}/.cluster-metadata.json"
+    rhcos_metadata_url: "https://raw.githubusercontent.com/openshift/installer/release-{{ _minor }}/data/data/coreos/rhcos.json"
+  vars:
+    _vparts: "{{ ocp_version.split('.') }}"
+    _three_part: "{{ (_vparts | length) >= 3 }}"
+    _minor: "{{ (_vparts[0] ~ '.' ~ _vparts[1]) if _three_part else ocp_version }}"
+    _full: >-
+      {{ ocp_version_full if (ocp_version_full | default('', true) | trim | length) > 0
+         else (ocp_version if _three_part else ocp_versions[ocp_version]) }}
+
+- name: Mostrar resumen del despliegue
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "  DESPLIEGUE OPENSHIFT UPI EN AWS"
+      - "=========================================="
+      - "  Cluster:    {{ cluster_name }}"
+      - "  Version:    {{ ocp_version_full }} (rama instalador {{ ocp_version_minor }})"
+      - "  Dominio:    {{ base_domain }}"
+      - "  Region:     {{ aws_region }}"
+      - "  Profile:    {{ aws_profile | default('default') }}"
+      - "  Dual-NIC:   {{ enable_dual_nic | default(false) }}"
+      - "  Directorio: {{ install_dir }}"
+      - "=========================================="
+
+- name: Obtener metadatos RHCOS para OCP {{ ocp_version_minor }}
+  ansible.builtin.uri:
+    url: "{{ rhcos_metadata_url }}"
+    return_content: true
+  register: rhcos_metadata
+  retries: "{{ aws_api_retries }}"
+  until: rhcos_metadata is succeeded
+  delay: "{{ aws_api_retry_delay }}"
+
+- name: Extraer AMI de RHCOS para {{ aws_region }}
+  ansible.builtin.set_fact:
+    rhcos_ami: "{{ (rhcos_metadata.content | from_json).architectures.x86_64.images.aws.regions[aws_region].image }}"
+
+- name: Validar que la AMI existe en AWS
+  ansible.builtin.command:
+    cmd: >
+      aws ec2 describe-images
+      --image-ids {{ rhcos_ami }}
+      --query 'Images[0].{ID:ImageId,Name:Name,State:State}'
+      --output json
+  environment: "{{ aws_env }}"
+  register: ami_check
+  changed_when: false
+  retries: "{{ aws_api_retries }}"
+  until: ami_check is succeeded
+  delay: "{{ aws_api_retry_delay }}"
+
+- name: Mostrar AMI resuelta
+  ansible.builtin.debug:
+    msg: "RHCOS AMI para {{ aws_region }}: {{ rhcos_ami }} - {{ (ami_check.stdout | from_json).Name }}"
+
+- name: Verificar que la AMI esta disponible
+  ansible.builtin.assert:
+    that:
+      - (ami_check.stdout | from_json).State == 'available'
+    fail_msg: "La AMI {{ rhcos_ami }} no esta disponible en {{ aws_region }}"
+
+# === FASE 2: Validar credenciales AWS ===
+
+- name: Validar credenciales AWS
+  ansible.builtin.command:
+    cmd: aws sts get-caller-identity --output json
+  environment: "{{ aws_env }}"
+  register: aws_identity
+  changed_when: false
+  retries: "{{ aws_api_retries }}"
+  until: aws_identity is succeeded
+  delay: "{{ aws_api_retry_delay }}"
+
+- name: Mostrar identidad AWS
+  ansible.builtin.debug:
+    msg: "Cuenta AWS: {{ (aws_identity.stdout | from_json).Account }}"
+
+- name: Validar que la region esta habilitada
+  ansible.builtin.command:
+    cmd: aws ec2 describe-availability-zones --query 'AvailabilityZones[0].State' --output text
+  environment: "{{ aws_env }}"
+  register: region_check
+  changed_when: false
+
+- name: Verificar que la region responde
+  ansible.builtin.assert:
+    that:
+      - region_check.stdout == 'available'
+    fail_msg: "La region {{ aws_region }} no esta habilitada o no responde en esta cuenta AWS"
+
+# === FASE 3: Proteccion contra conflictos ===
+
+- name: Comprobar si existe metadata de un cluster anterior
+  ansible.builtin.stat:
+    path: "{{ cluster_metadata_file }}"
+  register: existing_metadata
+
+- name: Leer metadata existente
+  ansible.builtin.slurp:
+    src: "{{ cluster_metadata_file }}"
+  register: existing_metadata_content
+  when: existing_metadata.stat.exists
+
+- name: Validar que la configuracion coincide con el cluster existente
+  ansible.builtin.assert:
+    that:
+      - (existing_metadata_content.content | b64decode | from_json).aws_region == aws_region
+      - (existing_metadata_content.content | b64decode | from_json).ocp_version == ocp_version_minor
+      - (existing_metadata_content.content | b64decode | from_json).ocp_version_full == ocp_version_full
+      - (existing_metadata_content.content | b64decode | from_json).cluster_name == cluster_name
+    fail_msg: >
+      CONFLICTO DETECTADO: Ya existe un cluster en {{ install_dir }} con configuracion diferente.
+      Usa un cluster_name diferente o elimina el directorio manualmente.
+  when: existing_metadata.stat.exists
+
+- name: Comprobar si existe terraform state
+  ansible.builtin.stat:
+    path: "{{ terraform_dir }}/terraform.tfstate"
+  register: existing_tfstate
+
+- name: Verificar recursos en terraform state existente
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/terraform state list"
+    chdir: "{{ terraform_dir }}"
+  register: tf_state_list
+  changed_when: false
+  when: existing_tfstate.stat.exists
+  ignore_errors: true
+
+- name: ALERTA - Infraestructura existente detectada
+  ansible.builtin.debug:
+    msg: >
+      ATENCION: Se han detectado {{ tf_state_list.stdout_lines | length }} recursos existentes
+      en el terraform state. Terraform sincronizara el estado con la configuracion actual.
+  when:
+    - existing_tfstate.stat.exists
+    - tf_state_list is succeeded
+    - tf_state_list.stdout_lines | length > 0
+
+# === FASE 4: Detectar recursos huerfanos (IAM + ELBv2) ===
+
+- name: Buscar roles IAM huerfanos con prefijo {{ cluster_name }}
+  ansible.builtin.command:
+    cmd: >
+      aws iam list-roles
+      --query "Roles[?starts_with(RoleName,'{{ cluster_name }}-')].RoleName"
+      --output json
+  environment: "{{ aws_env }}"
+  register: existing_iam_roles
+  changed_when: false
+
+- name: Buscar policies IAM huerfanas con prefijo {{ cluster_name }}
+  ansible.builtin.command:
+    cmd: >
+      aws iam list-policies --scope Local
+      --query "Policies[?starts_with(PolicyName,'{{ cluster_name }}-')].PolicyName"
+      --output json
+  environment: "{{ aws_env }}"
+  register: existing_iam_policies
+  changed_when: false
+
+- name: Verificar que no hay recursos IAM huerfanos
+  ansible.builtin.assert:
+    that:
+      - (existing_iam_roles.stdout | from_json | length) == 0
+      - (existing_iam_policies.stdout | from_json | length) == 0
+    fail_msg: >
+      RECURSOS IAM HUERFANOS DETECTADOS que pueden causar conflictos.
+      Eliminalos manualmente antes de continuar o usa un cluster_name diferente.
+  when: not (existing_tfstate.stat.exists | default(false))
+
+- name: Buscar Load Balancers huerfanos con prefijo {{ cluster_name }}
+  ansible.builtin.command:
+    cmd: >
+      aws elbv2 describe-load-balancers
+      --query "LoadBalancers[?contains(LoadBalancerName,'{{ cluster_name }}-')].LoadBalancerName"
+      --output json
+  environment: "{{ aws_env }}"
+  register: existing_lbs
+  changed_when: false
+
+- name: Buscar Target Groups huerfanos con prefijo {{ cluster_name }}
+  ansible.builtin.command:
+    cmd: >
+      aws elbv2 describe-target-groups
+      --query "TargetGroups[?contains(TargetGroupName,'{{ cluster_name }}-')].TargetGroupName"
+      --output json
+  environment: "{{ aws_env }}"
+  register: existing_tgs
+  changed_when: false
+
+- name: Verificar que no hay recursos ELBv2 huerfanos
+  ansible.builtin.assert:
+    that:
+      - (existing_lbs.stdout | from_json | length) == 0
+      - (existing_tgs.stdout | from_json | length) == 0
+    fail_msg: >
+      RECURSOS ELBv2 HUERFANOS DETECTADOS en {{ aws_region }}.
+      Eliminalos manualmente antes de continuar o usa un cluster_name diferente.
+  when: not (existing_tfstate.stat.exists | default(false))
+
+# === FASE 5: Validar zona Route53 ===
+
+- name: Verificar que existe la zona Route53 para {{ base_domain }}
+  ansible.builtin.command:
+    cmd: >
+      aws route53 list-hosted-zones-by-name
+      --dns-name {{ base_domain }}
+      --max-items 1
+      --query "HostedZones[?Name=='{{ base_domain }}.'].Id"
+      --output json
+  environment: "{{ aws_env }}"
+  register: route53_zone
+  changed_when: false
+  retries: "{{ aws_api_retries }}"
+  until: route53_zone is succeeded
+  delay: "{{ aws_api_retry_delay }}"
+
+- name: Verificar que la zona DNS existe
+  ansible.builtin.assert:
+    that:
+      - (route53_zone.stdout | from_json | length) > 0
+    fail_msg: >
+      No se encontro la zona Route53 para '{{ base_domain }}'.
+      Asegurate de que la zona existe en la cuenta AWS.
+
+- name: Extraer ID de la zona Route53
+  ansible.builtin.set_fact:
+    route53_zone_id: "{{ (route53_zone.stdout | from_json)[0] | regex_replace('.*/hostedzone/', '') | regex_replace('\"', '') }}"
+
+- name: Mostrar zona Route53
+  ansible.builtin.debug:
+    msg: "Zona Route53 encontrada para {{ base_domain }}: {{ route53_zone_id }}"
+
+- name: Buscar registros DNS existentes para api.{{ cluster_name }}.{{ base_domain }}
+  ansible.builtin.command:
+    cmd: >
+      aws route53 list-resource-record-sets
+      --hosted-zone-id {{ route53_zone_id }}
+      --query "ResourceRecordSets[?Name=='api.{{ cluster_name }}.{{ base_domain }}.' || Name=='api-int.{{ cluster_name }}.{{ base_domain }}.' || Name=='\\*.apps.{{ cluster_name }}.{{ base_domain }}.'].Name"
+      --output json
+  environment: "{{ aws_env }}"
+  register: existing_dns_records
+  changed_when: false
+
+- name: Verificar que no hay registros DNS huerfanos para {{ cluster_name }}.{{ base_domain }}
+  ansible.builtin.assert:
+    that:
+      - (existing_dns_records.stdout | from_json | length) == 0
+    fail_msg: >
+      REGISTROS DNS EXISTENTES DETECTADOS en la zona {{ base_domain }}.
+      Destruye el cluster existente primero o usa un cluster_name diferente.
+  when: not (existing_tfstate.stat.exists | default(false))

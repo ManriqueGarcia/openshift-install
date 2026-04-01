@@ -1,0 +1,181 @@
+---
+name: openshift-deploy
+description: Deploy and bootstrap OpenShift UPI clusters on AWS using Ansible and Terraform. Use when creating clusters, running the playbook, waiting for bootstrap, approving CSRs, or destroying infrastructure.
+globs: roles/ocp_upi_aws/**,clusters/**/*.tf,clusters/**/*.tfvars,playbook.yml,**/install-config*,**/*.ign
+allowed-tools: Shell, Read, Grep, Glob, StrReplace, Write
+metadata:
+  tags: openshift, deploy, upi, bootstrap, terraform, ansible, aws, ignition
+  platforms: Claude
+---
+
+
+# OpenShift UPI Deployment
+
+
+## When to use this skill
+
+- **New cluster creation**: Running the Ansible playbook to deploy a cluster
+- **Bootstrap monitoring**: Waiting for bootstrap to complete, checking API/etcd
+- **CSR approval**: Approving worker certificate signing requests
+- **Terraform operations**: plan, apply, destroy, state management
+- **Cluster destruction**: Tearing down infrastructure cleanly
+
+
+## Context: Repository structure
+
+This repository automates OpenShift UPI installation on AWS:
+- **Ansible** (`playbook.yml` → `roles/ocp_upi_aws/`) orchestrates the full deployment
+- **Terraform** (`roles/ocp_upi_aws/files/terraform/`) provisions AWS infrastructure
+- **Jinja2 templates** (`roles/ocp_upi_aws/templates/`) for install-config, tfvars, NMState
+
+Key paths:
+- Binaries: `bin/<version>/` (oc, openshift-install, terraform)
+- Cluster state: `clusters/<name>/<version>/<region>/`
+- Kubeconfig: `clusters/<name>/<version>/<region>/ocp/auth/kubeconfig`
+- Terraform dir: `clusters/<name>/<version>/<region>/terraform/`
+- Cluster metadata: `clusters/<name>/<version>/<region>/.cluster-metadata.json`
+
+Versions are defined in `roles/ocp_upi_aws/defaults/main.yml` under `ocp_versions`.
+Always check the file for current values; do NOT assume versions from this document.
+
+
+## Deployment phases (tasks/main.yml)
+
+The playbook executes 13 phases sequentially:
+
+| Phase | Name | What it does |
+|-------|------|-------------|
+| 1 | Validaciones previas | Resolve OCP version, fetch RHCOS metadata, validate AMI |
+| 2 | Credenciales AWS | Validate AWS identity (`sts get-caller-identity`), check region |
+| 3 | Protección contra conflictos | Detect existing cluster metadata/tfstate, prevent overwrites |
+| 4 | Recursos huérfanos | Search for orphan IAM roles/policies, ELBv2, target groups |
+| 5 | Zona Route53 | Validate base domain zone exists, check for orphan DNS records |
+| 6 | Directorios y metadata | Create install dir, save cluster metadata JSON |
+| 7 | Binarios | Download openshift-install, oc, terraform to `bin/<version>/` |
+| 8 | SSH key | Generate ed25519 key pair for node access |
+| 9 | Ignition | Render install-config → manifests → patch CPMS Inactive → (optional dual-NIC NMState) → ignition configs → extract master.ign/worker.ign from state file |
+| 10 | Terraform | Copy .tf files, render tfvars, init, plan, apply |
+| 11 | Bootstrap wait | `openshift-install wait-for bootstrap-complete` (45min timeout) |
+| 12 | CSR approval | Approve pending CSRs in a loop (10 attempts, 30s apart) |
+| 13 | Install complete | `openshift-install wait-for install-complete` (45min), show final status |
+
+
+## Design decisions
+
+- **NLB (not ALB)** for API and MCS because they need TCP passthrough (TLS termination happens at kube-apiserver, not the LB)
+- **CPMS set to Inactive** in manifests (Phase 9) because UPI has no Machine API managing control plane nodes; leaving it Active causes a permanently degraded operator
+- **master.ign/worker.ign extracted from state file** because `openshift-install create ignition-configs` in 4.14+ only writes `bootstrap.ign` to disk; the others are embedded in `.openshift_install_state.json`
+- **masters set as non-schedulable** (`mastersSchedulable: false`) to keep workloads on workers
+- **Orphan detection (Phase 4)** prevents Terraform conflicts from leftover IAM/ELB/DNS resources of a previous cluster with the same name
+- **ed25519 SSH keys** (not RSA) because RHCOS prefers them and they're faster/smaller
+
+
+## Bootstrap troubleshooting
+
+```bash
+SSH_KEY=~/.ssh/ocp-<cluster-name>
+
+# SSH to bootstrap (has public IP)
+ssh -i $SSH_KEY core@<bootstrap-public-ip>
+
+# Check bootstrap progress
+sudo journalctl -u bootkube --no-pager | tail -30
+
+# Check MCS (Machine Config Server)
+sudo crictl logs $(sudo crictl ps -q --name machine-config-server | head -1) | tail -20
+
+# Check if API is up
+curl -sk https://localhost:6443/healthz
+
+# Check if MCS serves worker config
+curl -sk https://localhost:22623/config/worker | head -c 100
+```
+
+SSH to masters/workers (private subnets) through the bootstrap:
+```bash
+ssh -J core@<bootstrap-ip> -i $SSH_KEY core@<node-private-ip>
+```
+
+
+## CSR approval
+
+Workers require manual CSR approval in UPI (the playbook does this automatically in Phase 12, but sometimes manual intervention is needed):
+
+```bash
+export KUBECONFIG=clusters/<name>/<version>/<region>/ocp/auth/kubeconfig
+
+# Approve all pending CSRs
+oc get csr -o name | xargs oc adm certificate approve
+
+# Watch for new CSRs (workers generate 2 rounds: node-bootstrapper then node serving)
+watch 'oc get csr | grep Pending'
+```
+
+
+## Terraform operations on live clusters
+
+```bash
+cd clusters/<name>/<version>/<region>/terraform
+
+terraform state list
+terraform plan
+terraform apply -target=aws_network_interface.master_secondary
+terraform taint 'aws_instance.worker[0]'
+```
+
+
+## Destroy a cluster
+
+```bash
+cd clusters/<name>/<version>/<region>/terraform
+
+# 1. Delete operator-created Classic ELBs (not managed by Terraform)
+VPC_ID=$(terraform output -raw vpc_id)
+aws elb describe-load-balancers \
+  --query "LoadBalancerDescriptions[?VPCId=='$VPC_ID'].LoadBalancerName" \
+  --output text | xargs -I{} aws elb delete-load-balancer --load-balancer-name {}
+
+# 2. Delete orphan SGs created by the ingress operator ELB
+aws ec2 describe-security-groups \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=k8s-*" \
+  --query 'SecurityGroups[*].GroupId' --output text | \
+  xargs -I{} aws ec2 delete-security-group --group-id {}
+
+# 3. Check for *.apps DNS pointing to operator ELB in public zone (remove manually)
+
+# 4. Destroy
+terraform destroy -auto-approve
+```
+
+
+## Key files
+
+| File | Purpose |
+|------|---------|
+| `roles/ocp_upi_aws/defaults/main.yml` | Default variables (versions, instance types, paths, flags) |
+| `roles/ocp_upi_aws/tasks/main.yml` | Main playbook — 13 deployment phases |
+| `templates/install-config.yaml.j2` | OpenShift install-config template |
+| `templates/terraform.tfvars.j2` | Variables passed from Ansible to Terraform |
+| `files/terraform/network.tf` | VPC, subnets (primary + secondary), route tables |
+| `files/terraform/compute.tf` | EC2 instances, ENIs, LB target attachments |
+| `files/terraform/security.tf` | Security groups and internal communication rules |
+| `files/terraform/dns.tf` | Route53 records (api, api-int, *.apps) |
+| `files/terraform/load_balancers.tf` | NLBs for API (6443), MCS (22623), Ingress (80/443) |
+
+
+## Constraints
+
+### Required (MUST)
+
+1. **Always use `--kubeconfig`** or `export KUBECONFIG` before running oc commands
+2. **Approve CSRs** after workers join — they generate two rounds
+3. **Verify security groups** after terraform apply — state drift is a known issue
+4. **Back up etcd** before destructive operations on control plane nodes
+5. **Delete operator ELBs** before terraform destroy (they block VPC deletion)
+
+### Prohibited (MUST NOT)
+
+1. **Never remove the bootstrap** from LB target groups before masters are serving API
+2. **Never modify ignition files** after instances have booted (consumed once at first boot)
+3. **Never force-push terraform state** without understanding what changed
+4. **Never reuse a cluster name** without cleaning up IAM/ELB/DNS resources first

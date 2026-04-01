@@ -1,0 +1,17 @@
+---
+- name: "Instalar operadores en cluster OpenShift"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  pre_tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - kubeconfig_path is defined and kubeconfig_path != ''
+        fail_msg: >
+          Debes proporcionar kubeconfig_path.
+          Ejemplo: ansible-playbook install-operators.yml -e kubeconfig_path=clusters/demo-420/4.20/eu-central-1/ocp/auth/kubeconfig
+
+  roles:
+    - ocp_operators

@@ -1,0 +1,129 @@
+---
+# === FASE 12: Aprobar CSRs de workers ===
+
+- name: Aprobar CSRs pendientes de workers (intento {{ item }}/{{ csr_approval_retries }})
+  ansible.builtin.shell: |
+    pending=$({{ bin_dir }}/oc get csr --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig -o json | python3 -c "
+    import json,sys
+    csrs = json.load(sys.stdin)['items']
+    pending = [c['metadata']['name'] for c in csrs if not c.get('status',{}).get('conditions')]
+    print(' '.join(pending))
+    ")
+    if [ -n "$pending" ]; then
+      for csr in $pending; do
+        {{ bin_dir }}/oc adm certificate approve $csr --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig
+      done
+    fi
+  environment: "{{ aws_env }}"
+  register: csr_approve
+  changed_when: "'approved' in (csr_approve.stdout | default(''))"
+  loop: "{{ range(1, csr_approval_retries + 1) | list }}"
+  loop_control:
+    pause: "{{ csr_approval_pause_seconds }}"
+
+- name: Consultar nodos tras aprobar CSRs
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc get nodes --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig"
+  environment: "{{ aws_env }}"
+  register: nodes_after_csr
+  changed_when: false
+
+- name: "ESTADO NODOS - {{ cluster_name }} {{ ocp_version }}"
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "  NODOS REGISTRADOS"
+      - "=========================================="
+      - "{{ nodes_after_csr.stdout }}"
+      - "=========================================="
+
+# === FASE 13: Esperar a que la instalacion complete ===
+
+- name: Esperar a que la instalacion complete
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/openshift-install wait-for install-complete --dir={{ install_dir }}/ocp --log-level=info"
+  environment: "{{ aws_env }}"
+  register: install_result
+  changed_when: false
+  async: "{{ install_timeout_seconds }}"
+  poll: "{{ install_poll_interval }}"
+  ignore_errors: true
+
+- name: Consultar estado final de operadores
+  ansible.builtin.shell: |
+    echo "OPERADORES CON PROBLEMAS:"
+    {{ bin_dir }}/oc get co --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig 2>&1 | grep -vE "True.*False.*False$" | grep -v "^$"
+    echo ""
+    echo "TODOS LOS OPERADORES:"
+    {{ bin_dir }}/oc get co --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig 2>&1
+  environment: "{{ aws_env }}"
+  register: co_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Consultar estado final de nodos
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc get nodes --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig"
+  environment: "{{ aws_env }}"
+  register: final_nodes
+  changed_when: false
+  ignore_errors: true
+
+- name: Consultar clusterversion final
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc get clusterversion --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig"
+  environment: "{{ aws_env }}"
+  register: cv_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Obtener URL de consola
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc get route console -n openshift-console --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig -o jsonpath='{.spec.host}'"
+  environment: "{{ aws_env }}"
+  register: console_url
+  changed_when: false
+  ignore_errors: true
+
+- name: "RESULTADO FINAL - {{ cluster_name }} {{ ocp_version }}"
+  ansible.builtin.debug:
+    msg:
+      - "============================================================"
+      - "  RESULTADO DE LA INSTALACION - {{ cluster_name }}"
+      - "============================================================"
+      - "  Version:    {{ ocp_version }} ({{ ocp_version_full }})"
+      - "  Region:     {{ aws_region }}"
+      - "  Estado:     {{ 'COMPLETADA' if install_result.rc | default(1) == 0 else 'CON ERRORES' }}"
+      - "============================================================"
+      - ""
+      - "  CLUSTERVERSION:"
+      - "{{ cv_status.stdout | default('No disponible') }}"
+      - ""
+      - "  NODOS:"
+      - "{{ final_nodes.stdout | default('No disponible') }}"
+      - ""
+      - "{{ co_status.stdout | default('No disponible') }}"
+      - ""
+      - "============================================================"
+      - "  ACCESO AL CLUSTER"
+      - "============================================================"
+      - "  Consola:    https://{{ console_url.stdout | default('no disponible aun') }}"
+      - "  API:        https://api.{{ cluster_name }}.{{ base_domain }}:6443"
+      - "  Usuario:    kubeadmin"
+      - "  Password:   (almacenado en {{ install_dir }}/ocp/auth/kubeadmin-password)"
+      - "  Kubeconfig: {{ install_dir }}/ocp/auth/kubeconfig"
+      - ""
+      - "  Para usar oc:"
+      - "    export KUBECONFIG={{ install_dir }}/ocp/auth/kubeconfig"
+      - "    export PATH={{ bin_dir }}:$PATH"
+      - "============================================================"
+
+- name: Fallar si la instalacion no completo
+  ansible.builtin.fail:
+    msg: >
+      La instalacion no completo correctamente.
+      Revisa los operadores con problemas en el resumen anterior.
+      Puedes seguir monitorizando con:
+        export KUBECONFIG={{ install_dir }}/ocp/auth/kubeconfig
+        {{ bin_dir }}/oc get co
+  when: install_result.rc | default(1) != 0

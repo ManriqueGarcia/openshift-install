@@ -1,0 +1,75 @@
+---
+- name: "{{ operator.name }} — Comprobar si el namespace existe"
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} get namespace {{ operator.namespace }} --kubeconfig={{ kubeconfig_path }}"
+  register: ns_check
+  changed_when: false
+  ignore_errors: true
+
+- name: "{{ operator.name }} — Crear namespace"
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} apply -f - --kubeconfig={{ kubeconfig_path }}"
+    stdin: "{{ lookup('template', 'namespace.yml.j2') }}"
+  when:
+    - operator.create_namespace | default(true)
+    - ns_check.rc != 0
+  register: ns_create
+  changed_when: "'created' in ns_create.stdout | default('')"
+
+- name: "{{ operator.name }} — Comprobar si el OperatorGroup existe"
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} get operatorgroup {{ operator.name }}-og -n {{ operator.namespace }} --kubeconfig={{ kubeconfig_path }}"
+  register: og_check
+  changed_when: false
+  ignore_errors: true
+
+- name: "{{ operator.name }} — Crear OperatorGroup"
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} apply -f - --kubeconfig={{ kubeconfig_path }}"
+    stdin: "{{ lookup('template', 'operatorgroup.yml.j2') }}"
+  when:
+    - operator.create_operator_group | default(true)
+    - og_check.rc != 0
+  register: og_create
+  changed_when: "'created' in og_create.stdout | default('')"
+
+- name: "{{ operator.name }} — Comprobar si la Subscription existe"
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} get subscription {{ operator.name }} -n {{ operator.namespace }} --kubeconfig={{ kubeconfig_path }}"
+  register: sub_check
+  changed_when: false
+  ignore_errors: true
+
+- name: "{{ operator.name }} — Crear Subscription"
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} apply -f - --kubeconfig={{ kubeconfig_path }}"
+    stdin: "{{ lookup('template', 'subscription.yml.j2') }}"
+  when: sub_check.rc != 0
+  register: sub_create
+  changed_when: "'created' in sub_create.stdout | default('')"
+
+- name: "{{ operator.name }} — Esperar a que el CSV esté en Succeeded"
+  ansible.builtin.shell: |
+    csv=$({{ oc_bin }} get subscription {{ operator.name }} \
+      -n {{ operator.namespace }} \
+      --kubeconfig={{ kubeconfig_path }} \
+      -o jsonpath='{.status.installedCSV}' 2>/dev/null)
+    if [ -z "$csv" ]; then
+      echo "WAITING"
+      exit 1
+    fi
+    phase=$({{ oc_bin }} get csv "$csv" \
+      -n {{ operator.namespace }} \
+      --kubeconfig={{ kubeconfig_path }} \
+      -o jsonpath='{.status.phase}' 2>/dev/null)
+    echo "$csv: $phase"
+    [ "$phase" = "Succeeded" ]
+  register: csv_status
+  changed_when: false
+  retries: "{{ (operator_ready_timeout / operator_ready_poll) | int }}"
+  until: csv_status.rc == 0
+  delay: "{{ operator_ready_poll }}"
+
+- name: "{{ operator.name }} — Operador instalado correctamente"
+  ansible.builtin.debug:
+    msg: "{{ csv_status.stdout }}"

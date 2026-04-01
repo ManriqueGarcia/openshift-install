@@ -1,17 +1,9 @@
 ---
-ocp_version: "4.20"
-
-crc_version: "2.48.0"
-crc_url: "https://developers.redhat.com/content-gateway/rest/mirror/pub/openshift-v4/clients/crc/{{ crc_version }}/crc-linux-amd64.tar.xz"
-crc_bundle_url: "https://mirror.openshift.com/pub/openshift-v4/clients/crc/bundles/openshift/{{ ocp_version_full }}/crc_libvirt_{{ ocp_version_full }}_amd64.crcbundle"
-
-ocp_versions:
-  "4.18": "4.18.34"
-  "4.19": "4.19.24"
-  "4.20": "4.20.15"
+crc_version: "latest"
+crc_url: "https://mirror.openshift.com/pub/openshift-v4/clients/crc/{{ crc_version }}/crc-linux-amd64.tar.xz"
 
 crc_cpus: 4
-crc_memory: 10240
+crc_memory: 10752
 crc_disk: 35
 
 pull_secret_path: "{{ playbook_dir }}/pull-secret.txt"

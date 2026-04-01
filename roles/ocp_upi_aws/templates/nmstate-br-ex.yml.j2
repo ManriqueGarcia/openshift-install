@@ -1,0 +1,53 @@
+interfaces:
+  - name: br-ex
+    type: ovs-bridge
+    state: up
+    bridge:
+      options:
+        stp:
+          enabled: false
+      port:
+        - name: ens5
+  - name: ens5
+    type: ethernet
+    state: up
+    ipv4:
+      enabled: false
+    ipv6:
+      enabled: false
+  - name: br-ex
+    type: ovs-interface
+    state: up
+    ipv4:
+      enabled: true
+      dhcp: true
+      auto-gateway: true
+      auto-routes: true
+      auto-route-table-id: 0
+      auto-route-metric: 48
+    ipv6:
+      enabled: true
+      dhcp: true
+      autoconf: true
+      auto-gateway: true
+      auto-routes: true
+      auto-route-table-id: 0
+      auto-route-metric: 48
+  - name: ens6
+    type: ethernet
+    state: up
+    ipv4:
+      enabled: true
+      dhcp: true
+      auto-gateway: true
+      auto-routes: true
+      auto-route-table-id: 0
+      auto-route-metric: 101
+    ipv6:
+      enabled: true
+      dhcp: true
+      autoconf: true
+      auto-gateway: true
+      auto-routes: true
+      auto-route-table-id: 0
+      auto-route-metric: 101

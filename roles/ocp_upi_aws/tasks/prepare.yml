@@ -1,0 +1,116 @@
+---
+# === FASE 6: Crear directorios y guardar metadata ===
+
+- name: Crear directorio de instalacion
+  ansible.builtin.file:
+    path: "{{ install_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Guardar metadata del cluster
+  ansible.builtin.copy:
+    content: |
+      {
+        "cluster_name": "{{ cluster_name }}",
+        "ocp_version": "{{ ocp_version_minor }}",
+        "ocp_version_full": "{{ ocp_version_full }}",
+        "aws_region": "{{ aws_region }}",
+        "aws_profile": "{{ aws_profile }}",
+        "base_domain": "{{ base_domain }}",
+        "rhcos_ami": "{{ rhcos_ami }}",
+        "created_at": "{{ ansible_date_time.iso8601 }}"
+      }
+    dest: "{{ cluster_metadata_file }}"
+    mode: "0640"
+
+- name: Crear directorio de binarios para version {{ ocp_version_full }}
+  ansible.builtin.file:
+    path: "{{ bin_dir }}"
+    state: directory
+    mode: "0755"
+
+# === FASE 7: Descargar binarios ===
+
+- name: Descargar openshift-install {{ ocp_version_full }}
+  ansible.builtin.unarchive:
+    src: "{{ ocp_mirror_url }}/{{ ocp_version_full }}/openshift-install-linux-{{ ocp_version_full }}.tar.gz"
+    dest: "{{ bin_dir }}"
+    remote_src: true
+    creates: "{{ bin_dir }}/openshift-install"
+
+- name: Descargar cliente oc {{ ocp_version_full }}
+  ansible.builtin.unarchive:
+    src: "{{ ocp_mirror_url }}/{{ ocp_version_full }}/openshift-client-linux-{{ ocp_version_full }}.tar.gz"
+    dest: "{{ bin_dir }}"
+    remote_src: true
+    creates: "{{ bin_dir }}/oc"
+
+- name: Verificar openshift-install
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/openshift-install version"
+  changed_when: false
+
+- name: Verificar cliente oc
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc version --client"
+  changed_when: false
+
+- name: Comprobar si terraform ya existe
+  ansible.builtin.stat:
+    path: "{{ bin_dir }}/terraform"
+  register: terraform_stat
+
+- name: Crear directorio temporal para terraform
+  ansible.builtin.tempfile:
+    state: directory
+  register: terraform_tmpdir
+  when: not terraform_stat.stat.exists
+
+- name: Descargar terraform {{ terraform_version }}
+  ansible.builtin.get_url:
+    url: "{{ terraform_url }}"
+    dest: "{{ terraform_tmpdir.path }}/terraform.zip"
+    mode: "0644"
+  when: not terraform_stat.stat.exists
+
+- name: Descomprimir terraform en {{ bin_dir }}
+  ansible.builtin.unarchive:
+    src: "{{ terraform_tmpdir.path }}/terraform.zip"
+    dest: "{{ bin_dir }}"
+    remote_src: true
+    mode: "0755"
+  when: not terraform_stat.stat.exists
+
+- name: Eliminar directorio temporal de terraform
+  ansible.builtin.file:
+    path: "{{ terraform_tmpdir.path }}"
+    state: absent
+  when: not terraform_stat.stat.exists
+
+- name: Verificar terraform
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/terraform version"
+  changed_when: false
+
+# === FASE 8: Generar SSH key ===
+
+- name: Comprobar si existe la clave SSH
+  ansible.builtin.stat:
+    path: "{{ ssh_key_path }}"
+  register: ssh_key_stat
+
+- name: Generar clave SSH para el cluster
+  ansible.builtin.command:
+    cmd: ssh-keygen -t ed25519 -C "ocp-{{ cluster_name }}" -f "{{ ssh_key_path }}" -N ""
+    creates: "{{ ssh_key_path }}"
+  when: not ssh_key_stat.stat.exists
+
+- name: Asegurar permisos de la clave SSH privada
+  ansible.builtin.file:
+    path: "{{ ssh_key_path }}"
+    mode: "0600"
+
+- name: Leer clave publica SSH
+  ansible.builtin.slurp:
+    src: "{{ ssh_key_path }}.pub"
+  register: ssh_pub_key

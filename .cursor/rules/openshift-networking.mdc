@@ -1,0 +1,222 @@
+---
+name: openshift-networking
+description: Configure and troubleshoot OpenShift networking — OVN-Kubernetes, NMState, OVS bridges, dual-NIC with separate subnets, route metrics, and AWS ENI management. Use when modifying network configuration, adding secondary NICs, or debugging br-ex/OVS issues.
+globs: "**/nmstate*,**/network.tf,**/compute.tf,roles/ocp_upi_aws/templates/*nmstate*,roles/ocp_upi_aws/templates/*br-ex*"
+allowed-tools: Shell, Read, Grep, Glob, StrReplace, Write
+metadata:
+  tags: openshift, networking, ovn, nmstate, dual-nic, ovs, bridge, aws-eni
+  platforms: Claude
+---
+
+
+# OpenShift Networking (OVN-K, NMState, Dual-NIC)
+
+
+## When to use this skill
+
+- **Dual-NIC setup**: Adding a secondary ENI with separate subnet for masters/workers
+- **OVS bridge configuration**: Configuring `br-ex` with NMState
+- **Route metric tuning**: Controlling primary vs secondary gateway priority
+- **ENI troubleshooting**: Interface naming, reboot persistence, OVN interaction
+- **NMState/MachineConfig**: Creating or modifying network configuration manifests
+
+
+## Design decisions
+
+### Why OVS bridge (br-ex) instead of direct NIC config
+OVN-Kubernetes requires `br-ex` as its external bridge. When OpenShift boots, `configure-ovs.sh` (via `ovs-configuration.service`) migrates the primary NIC IP to `br-ex`. By pre-configuring this in NMState, we control the exact bridge setup instead of letting OVN guess.
+
+### Why separate subnets for dual-NIC
+Each ENI must be in a different subnet so that:
+- Each gets its own gateway from a different CIDR
+- Route tables can distinguish traffic per interface
+- AWS DHCP assigns IPs from the correct range per ENI
+- Network policies can target traffic by subnet
+
+Primary subnets: `10.0.10.0/24`, `10.0.11.0/24`, `10.0.12.0/24` (one per AZ)
+Secondary subnets: `10.0.30.0/24`, `10.0.31.0/24`, `10.0.32.0/24` (one per AZ)
+
+The `10.0.3x.0/24` range was chosen to avoid collision with the primary `10.0.1x.0/24` private subnets and `10.0.0.0/24`–`10.0.2.0/24` public subnets.
+
+### Why route metrics 48 and 101
+- `br-ex` (primary) gets metric `48` — lower wins, so this is the default route
+- `ens6` (secondary) gets metric `101` — used only when primary route doesn't match
+- These values were chosen to not conflict with OVN-K internal metrics (which default to 48 for `br-ex`)
+
+### Why Nitro instances for dual-NIC
+AWS Nitro instances (m5, c5, r5, etc.) use deterministic ENI naming:
+- `device_index=0` → always `ens5`
+- `device_index=1` → always `ens6`
+
+This naming is stable across reboots, even with OVN-Kubernetes managing `br-ex`. Non-Nitro instances (t2, m4, etc.) use `eth0`/`eth1` which can be unpredictable.
+
+
+## Architecture: Dual-NIC data flow
+
+```
+                     VPC 10.0.0.0/16
+                           │
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+   ┌─────┴──────┐   ┌─────┴──────┐   ┌─────┴──────┐
+   │  AZ-a      │   │  AZ-b      │   │  AZ-c      │
+   │            │   │            │   │            │
+   │ Primary    │   │ Primary    │   │ Primary    │
+   │ 10.0.10/24 │   │ 10.0.11/24 │   │ 10.0.12/24 │
+   │  ens5      │   │  ens5      │   │  ens5      │
+   │  ↓ br-ex   │   │  ↓ br-ex   │   │  ↓ br-ex   │
+   │  metric 48 │   │  metric 48 │   │  metric 48 │
+   │            │   │            │   │            │
+   │ Secondary  │   │ Secondary  │   │ Secondary  │
+   │ 10.0.30/24 │   │ 10.0.31/24 │   │ 10.0.32/24 │
+   │  ens6      │   │  ens6      │   │  ens6      │
+   │  metric101 │   │  metric101 │   │  metric101 │
+   └────────────┘   └────────────┘   └────────────┘
+```
+
+
+## Enabling dual-NIC
+
+Set `enable_dual_nic: true` in the playbook vars or `defaults/main.yml`. This triggers:
+
+1. **Terraform** (`network.tf`): Creates 3 secondary subnets (`10.0.3x.0/24`)
+2. **Terraform** (`compute.tf`): Creates secondary ENIs in those subnets, attaches to instances
+3. **Ansible** (Phase 9): Renders NMState YAML → base64 → MachineConfig manifest
+4. **Ignition**: MachineConfig places `/etc/nmstate/openshift/cluster.yml` on first boot
+5. **RHCOS boot**: `ovs-configuration.service` reads the NMState config and applies it
+
+
+## Key files for networking
+
+| File | What it controls |
+|------|-----------------|
+| `templates/nmstate-br-ex.yml.j2` | NMState YAML: br-ex bridge, ens5 as port, ens6 secondary |
+| `templates/99-nmstate-br-ex.yaml.j2` | MachineConfig wrapping the NMState file (base64 encoded) |
+| `files/terraform/network.tf` | VPC, primary subnets, secondary subnets (conditional) |
+| `files/terraform/compute.tf` | EC2 instances, primary + secondary ENIs, device_index |
+| `files/terraform/variables.tf` | `enable_dual_nic` variable definition |
+| `templates/terraform.tfvars.j2` | Passes `enable_dual_nic` from Ansible to Terraform |
+
+
+## NMState configuration (nmstate-br-ex.yml.j2)
+
+The NMState config defines 4 interface entries:
+
+1. **`br-ex` (ovs-bridge)**: The OVS bridge with `ens5` as a port, STP disabled
+2. **`ens5` (ethernet)**: Physical NIC, IPv4/IPv6 disabled (IP lives on br-ex)
+3. **`br-ex` (ovs-interface)**: The internal interface that holds the IP, DHCP enabled, metric 48
+4. **`ens6` (ethernet)**: Secondary NIC, DHCP enabled, metric 101
+
+Note: `br-ex` appears twice — once as `ovs-bridge` (the bridge itself) and once as `ovs-interface` (the internal port that holds the IP). This is how OVS works.
+
+
+## Verification commands
+
+On a node with dual-NIC:
+
+```bash
+# Check both interfaces have IPs from different subnets
+ip -o -4 addr show br-ex
+ip -o -4 addr show ens6
+
+# Check two default routes with different metrics
+ip route show default
+# Expected:
+#   default via 10.0.1x.1 dev br-ex proto dhcp src 10.0.1x.xxx metric 48
+#   default via 10.0.3x.1 dev ens6 proto dhcp src 10.0.3x.xxx metric 101
+
+# Check OVS bridge has ens5 as a port
+sudo ovs-vsctl list-ports br-ex
+# Expected: ens5, patch-br-ex-to-br-int
+
+# Check NMState config was applied
+ls -la /etc/nmstate/openshift/
+cat /etc/nmstate/openshift/cluster.yml
+
+# Check both gateways are reachable
+ping -c 1 -I br-ex 8.8.8.8
+ping -c 1 -I ens6 8.8.8.8
+```
+
+
+## Reboot persistence validation
+
+After rebooting a node:
+
+```bash
+# 1. Verify interface names haven't swapped
+ip link show ens5   # Should still be device_index=0
+ip link show ens6   # Should still be device_index=1
+
+# 2. Verify br-ex is up with correct IP
+ip -4 addr show br-ex
+
+# 3. Verify ens6 has its own IP from secondary subnet
+ip -4 addr show ens6
+
+# 4. Verify two default routes
+ip route show default
+
+# 5. Verify OVS bridge
+sudo ovs-vsctl show
+
+# 6. Verify kubelet is running
+sudo systemctl is-active kubelet
+```
+
+On Nitro instances, ENI names are deterministic and do NOT swap on reboot. This has been validated with OVN-Kubernetes active.
+
+
+## Troubleshooting
+
+### br-ex not created / kubelet inactive after reboot
+
+Cause: Stale `/etc/nmstate/openshift/applied` marker file.
+
+```bash
+sudo rm -f /etc/nmstate/openshift/applied
+sudo systemctl restart ovs-configuration
+# Wait ~30 seconds
+sudo systemctl is-active kubelet
+```
+
+### ens6 has no IP
+
+Check that the secondary ENI was actually attached:
+```bash
+# On the node
+ip link show ens6
+
+# From AWS CLI
+aws ec2 describe-instances --instance-ids <id> \
+  --query 'Reservations[0].Instances[0].NetworkInterfaces[*].{Index:Attachment.DeviceIndex,SubnetId:SubnetId,IP:PrivateIpAddress}'
+```
+
+If missing, check `compute.tf` for `aws_network_interface_attachment` resources and run `terraform apply`.
+
+### Only one default route
+
+NetworkManager may have dropped the secondary route. Check:
+```bash
+nmcli connection show
+nmcli connection show ens6 | grep route
+```
+
+If `auto-gateway` is not set, the NMState config is missing `auto-gateway: true` for ens6.
+
+
+## Constraints
+
+### Required (MUST)
+
+1. **Use Nitro instances** (m5, c5, r5) for deterministic ENI naming
+2. **Separate subnets** for primary and secondary ENIs — same subnet won't work
+3. **Test reboots** after any network config change to validate persistence
+4. **Validate OVS bridge** has `ens5` as port, not `ens6`
+
+### Prohibited (MUST NOT)
+
+1. **Never put ens5 and ens6 in the same subnet** — route conflicts, DHCP issues
+2. **Never manually edit NetworkManager connections** — use NMState via MachineConfig
+3. **Never set ens6 metric lower than br-ex metric** — would steal the default route from OVN
+4. **Never use non-Nitro instances for dual-NIC** — ENI naming is unpredictable

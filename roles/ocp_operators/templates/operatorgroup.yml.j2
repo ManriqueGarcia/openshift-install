@@ -1,0 +1,14 @@
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: "{{ operator.name }}-og"
+  namespace: "{{ operator.namespace }}"
+{% if operator.target_namespaces | default([]) | length > 0 %}
+spec:
+  targetNamespaces:
+{% for ns in operator.target_namespaces %}
+    - "{{ ns }}"
+{% endfor %}
+{% else %}
+spec: {}
+{% endif %}

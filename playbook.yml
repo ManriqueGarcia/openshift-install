@@ -1,8 +1,34 @@
 ---
-- name: "Instalar cluster OpenShift {{ ocp_version }} UPI en AWS"
+- name: "Instalar cluster OpenShift UPI en AWS (version con -e ocp_version o -e ocp_version_full)"
   hosts: localhost
   connection: local
   gather_facts: true
+
+  pre_tasks:
+    - name: Validar variables requeridas
+      ansible.builtin.assert:
+        that:
+          - cluster_name is defined and cluster_name != 'ocp-cluster'
+          - base_domain is defined and base_domain != 'example.com'
+          - ocp_version is defined
+          - aws_region is defined
+        fail_msg: >
+          Variables requeridas no definidas o con valores por defecto.
+          Proporciona al menos: cluster_name, base_domain, ocp_version, aws_region.
+          Ejemplo: ansible-playbook playbook.yml -e cluster_name=demo -e base_domain=mydomain.com
+
+    - name: Validar que el pull-secret existe
+      ansible.builtin.stat:
+        path: "{{ pull_secret_path | default(playbook_dir + '/pull-secret.txt') }}"
+      register: pull_secret_check
+
+    - name: Fallar si no existe el pull-secret
+      ansible.builtin.assert:
+        that:
+          - pull_secret_check.stat.exists
+        fail_msg: >
+          No se encontro el pull-secret en {{ pull_secret_path | default(playbook_dir + '/pull-secret.txt') }}.
+          Descargalo de https://console.redhat.com/openshift/install/pull-secret
 
   roles:
     - ocp_upi_aws

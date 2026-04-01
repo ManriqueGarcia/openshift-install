@@ -71,9 +71,23 @@ resource "aws_route53_record" "api_internal" {
 }
 
 # 4. Registro Comodín (Wildcard) para Aplicaciones (*.apps)
+# Se crea en la zona base
 resource "aws_route53_record" "apps_wildcard" {
   zone_id = data.aws_route53_zone.base_zone.zone_id
   name    = "*.apps.${var.cluster_name}.${data.aws_route53_zone.base_zone.name}"
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.ingress.dns_name
+    zone_id                = aws_lb.ingress.zone_id
+    evaluate_target_health = true
+  }
+}
+
+# 4b. Registro *.apps en la zona privada del cluster
+resource "aws_route53_record" "apps_wildcard_private" {
+  zone_id = aws_route53_zone.private_zone.zone_id
+  name    = "*.apps.${var.cluster_name}.${var.base_domain}"
   type    = "A"
 
   alias {

@@ -1,0 +1,21 @@
+---
+# Ruta al binario oc (se puede heredar del rol ocp_upi_aws)
+oc_bin: "{{ bin_dir | default(playbook_dir + '/bin/' + ocp_version) }}/oc"
+kubeconfig_path: ""
+
+# Lista de operadores a instalar.
+# Cada entrada define un operador OLM completo.
+operators:
+  - name: cluster-observability-operator
+    namespace: openshift-cluster-observability-operator
+    channel: stable
+    source: redhat-operators
+    source_namespace: openshift-marketplace
+    install_approval: Automatic
+    create_namespace: true
+    create_operator_group: true
+    target_namespaces: []
+
+# Timeout esperando a que el operador esté listo
+operator_ready_timeout: 300
+operator_ready_poll: 10

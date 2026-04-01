@@ -1,0 +1,232 @@
+---
+name: openshift-troubleshoot
+description: Diagnose and fix OpenShift cluster issues — degraded operators, etcd quorum loss, authentication failures, ingress problems, security group drift, and node issues. Use when cluster operators are not healthy, nodes are NotReady, or API is unreachable.
+globs: clusters/**/auth/kubeconfig,roles/ocp_upi_aws/files/terraform/security.tf
+allowed-tools: Shell, Read, Grep, Glob
+metadata:
+  tags: openshift, troubleshoot, debug, operators, etcd, security-groups, aws
+  platforms: Claude
+---
+
+
+# OpenShift Troubleshooting
+
+
+## When to use this skill
+
+- **Degraded operators**: Any ClusterOperator not showing Available=True, Degraded=False
+- **Node issues**: NotReady nodes, kubelet/crio failures, CSR problems
+- **API unreachable**: Connection refused, TLS handshake timeout, etcd issues
+- **Security group problems**: State drift after terraform apply, missing internal rules
+- **Post-reboot recovery**: Cluster not coming back after node reboots
+
+
+## Step 1: Gather the full picture
+
+Always start here before diving into specifics:
+
+```bash
+export KUBECONFIG=clusters/<name>/<version>/<region>/ocp/auth/kubeconfig
+
+# Overall health (run all of these)
+oc get clusterversion
+oc get nodes
+oc get co
+
+# Only operators with problems
+oc get co | awk 'NR==1 || ($3!="True" || $4!="False" || $5!="False")'
+
+# Pending CSRs (common cause of worker issues)
+oc get csr | grep Pending
+
+# Recent events across all namespaces
+oc get events -A --sort-by='.lastTimestamp' | tail -30
+```
+
+
+## Step 2: Node-level debugging via SSH
+
+Nodes are in private subnets. SSH through the bootstrap (if still up) or a bastion:
+
+```bash
+SSH_KEY=~/.ssh/ocp-<cluster-name>
+ssh -J core@<jump-host-ip> -i $SSH_KEY core@<node-private-ip>
+```
+
+On the node:
+```bash
+sudo systemctl is-active kubelet crio
+sudo journalctl -u kubelet --no-pager -n 30
+sudo crictl ps
+sudo crictl logs <container-id>
+
+# Network state
+ip -o -4 addr show | grep -E "ens[56]|br-ex"
+ip route show default
+sudo ovs-vsctl show
+```
+
+
+## Known issues and fixes
+
+### 1. etcd cluster has no leader / quorum loss
+
+**Symptoms**:
+- `journalctl -u kubelet` shows `etcd cluster has no leader`
+- `oc get co etcd` shows Degraded=True
+- Masters show `i/o timeout` or `context deadline exceeded` in etcd logs
+
+**Root cause**: Security groups missing internal rules (all traffic between masters). This is a known Terraform state drift issue.
+
+**Fix**:
+```bash
+# Get SG IDs
+MASTER_SG=$(aws ec2 describe-security-groups \
+  --filters "Name=group-name,Values=*<cluster>*master*" \
+  --query 'SecurityGroups[0].GroupId' --output text)
+WORKER_SG=$(aws ec2 describe-security-groups \
+  --filters "Name=group-name,Values=*<cluster>*worker*" \
+  --query 'SecurityGroups[0].GroupId' --output text)
+
+# Add all 4 internal communication rules
+aws ec2 authorize-security-group-ingress --group-id $MASTER_SG --protocol -1 --source-group $MASTER_SG
+aws ec2 authorize-security-group-ingress --group-id $MASTER_SG --protocol -1 --source-group $WORKER_SG
+aws ec2 authorize-security-group-ingress --group-id $WORKER_SG --protocol -1 --source-group $MASTER_SG
+aws ec2 authorize-security-group-ingress --group-id $WORKER_SG --protocol -1 --source-group $WORKER_SG
+```
+
+**Verification**: Wait 2-3 minutes, then `oc get co etcd` should show Available=True.
+
+---
+
+### 2. Workers stuck in "Ignition fetch: Internal Server Error"
+
+**Symptoms**:
+- Workers loop fetching ignition from `api-int.<cluster>:22623/config/worker`
+- Bootstrap MCS log shows it's rejecting worker requests
+
+**Root cause**: Bootstrap MCS stops serving worker configs once masters are up. The NLB may still route some requests to the bootstrap.
+
+**Fix**: Deregister the bootstrap from the MCS target group (port 22623):
+```bash
+TG_ARN=$(aws elbv2 describe-target-groups \
+  --query "TargetGroups[?contains(TargetGroupName,'<cluster>') && Port==\`22623\`].TargetGroupArn" \
+  --output text)
+BOOTSTRAP_IP=<bootstrap-private-ip>
+aws elbv2 deregister-targets --target-group-arn $TG_ARN \
+  --targets Id=$BOOTSTRAP_IP
+```
+
+---
+
+### 3. authentication / console / monitoring degraded (*.apps not resolving)
+
+**Symptoms**:
+- `oc get co authentication` → Degraded, message mentions connection refused
+- `curl https://console-openshift-console.apps.<cluster>.<domain>` fails
+- `*.apps` DNS resolves to the Terraform NLB, but ingress uses a Classic ELB
+
+**Root cause**: The ingress operator creates its own Classic ELB automatically. The `*.apps` DNS record must point to THIS ELB, not the Terraform-managed NLB.
+
+**Fix**:
+```bash
+# Find the actual ingress ELB
+INGRESS_ELB=$(oc get svc -n openshift-ingress router-default \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Update *.apps in Route53 to point to $INGRESS_ELB
+# (use aws route53 change-resource-record-sets or the console)
+```
+
+---
+
+### 4. control-plane-machine-set degraded
+
+**Symptoms**: `oc get co control-plane-machine-set` shows Degraded=True in UPI.
+
+**Root cause**: CPMS expects Machine API to manage masters, which doesn't exist in UPI.
+
+**Fix (preventive)**: The playbook patches the CPMS manifest to `state: Inactive` before generating ignition (Phase 9). If it's already Active on a live cluster, it cannot be changed back — the operator will remain degraded but is harmless in UPI.
+
+---
+
+### 5. machine-config operator degraded during rollout
+
+**Symptoms**:
+- `oc get mcp` shows a pool updating
+- `oc get co machine-config` shows Progressing=True or Degraded=True
+
+**Root cause**: Normal during MachineConfig rollouts (e.g., after applying NMState configs). Each node reboots sequentially.
+
+**Fix**: Wait. Check progress with:
+```bash
+oc get mcp
+oc get nodes
+oc describe mcp worker  # shows which node is updating
+```
+
+If stuck for > 30 min on a single node, SSH in and check `journalctl -u machine-config-daemon`.
+
+---
+
+### 6. OVS bridge not created after reboot (dual-NIC)
+
+**Symptoms**:
+- After reboot, kubelet is inactive, `br-ex` doesn't exist
+- `ovs-configuration.service` log shows "already applied, skipping"
+
+**Root cause**: The stale marker file `/etc/nmstate/openshift/applied` prevents `configure-ovs.sh` from re-applying the NMState config.
+
+**Fix**:
+```bash
+sudo rm -f /etc/nmstate/openshift/applied
+sudo systemctl restart ovs-configuration
+# Wait ~30s, then:
+sudo systemctl restart kubelet
+```
+
+---
+
+### 7. DNS loops: alertmanager-main.openshift-monitoring.svc.openshift-insights.svc.cluster.local
+
+**Symptoms**: CoreDNS logs show queries concatenating service names:
+`alertmanager-main.openshift-monitoring.svc.openshift-insights.svc.cluster.local`
+
+**Root cause**: The openshift-insights operator resolves alertmanager using a relative name and `ndots:5` in pod DNS config causes search domain appending.
+
+**Impact**: Harmless — the query eventually resolves correctly. The concatenated names result in NXDOMAIN, then CoreDNS retries with the FQDN.
+
+
+## Security group verification checklist
+
+After any `terraform apply`, verify these 4 rules exist:
+
+| Source SG | Destination SG | Protocol | Required for |
+|-----------|---------------|----------|-------------|
+| master_sg | master_sg | All (-1) | etcd quorum, API server |
+| worker_sg | master_sg | All (-1) | kubelet → API, SDN |
+| master_sg | worker_sg | All (-1) | API → kubelet, SDN |
+| worker_sg | worker_sg | All (-1) | Pod-to-pod, SDN |
+
+```bash
+# Quick check
+aws ec2 describe-security-groups --group-ids $MASTER_SG \
+  --query 'SecurityGroups[0].IpPermissions[?IpProtocol==`-1`].UserIdGroupPairs[*].GroupId' \
+  --output text
+```
+
+
+## Constraints
+
+### Required (MUST)
+
+1. **Gather full picture first** (Step 1) before making any changes
+2. **Check security groups** whenever etcd or inter-node communication fails
+3. **Verify DNS target** for *.apps — it must point to the ingress operator's ELB, not Terraform's NLB
+4. **Check CSRs** when workers are NotReady
+
+### Prohibited (MUST NOT)
+
+1. **Never delete etcd pods** or force-delete control plane static pods
+2. **Never reboot all 3 masters simultaneously** — this causes etcd quorum loss
+3. **Never assume SG rules are correct** just because `security.tf` defines them — state drift happens

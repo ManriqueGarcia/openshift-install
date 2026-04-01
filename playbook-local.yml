@@ -1,5 +1,5 @@
 ---
-- name: "Instalar cluster OpenShift {{ ocp_version | default('4.20') }} local con CRC"
+- name: "Instalar cluster OpenShift local con CRC"
   hosts: localhost
   connection: local
   gather_facts: true

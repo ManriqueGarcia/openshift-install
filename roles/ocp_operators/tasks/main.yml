@@ -1,0 +1,26 @@
+---
+- name: Validar que kubeconfig_path esta definido
+  ansible.builtin.assert:
+    that:
+      - kubeconfig_path != ''
+    fail_msg: "Debes definir kubeconfig_path para conectar al cluster"
+
+- name: Verificar acceso al cluster
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} get clusterversion --kubeconfig={{ kubeconfig_path }}"
+  changed_when: false
+  register: cluster_check
+  retries: 3
+  until: cluster_check is succeeded
+  delay: 5
+
+- name: Mostrar version del cluster
+  ansible.builtin.debug:
+    msg: "{{ cluster_check.stdout }}"
+
+- name: Instalar operadores
+  ansible.builtin.include_tasks: install_operator.yml
+  loop: "{{ operators }}"
+  loop_control:
+    loop_var: operator
+    label: "{{ operator.name }}"

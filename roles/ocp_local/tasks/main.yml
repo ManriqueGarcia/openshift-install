@@ -1,21 +1,18 @@
 ---
 # === FASE 1: Validaciones previas ===
 
-- name: Resolver version completa de OCP {{ ocp_version }}
-  ansible.builtin.set_fact:
-    ocp_version_full: "{{ ocp_versions[ocp_version] }}"
-
 - name: Mostrar resumen del despliegue local
   ansible.builtin.debug:
     msg:
       - "=========================================="
       - "  DESPLIEGUE OPENSHIFT LOCAL (CRC)"
       - "=========================================="
-      - "  Version:  {{ ocp_version }} ({{ ocp_version_full }})"
       - "  CPUs:     {{ crc_cpus }}"
       - "  Memoria:  {{ crc_memory }} MiB"
       - "  Disco:    {{ crc_disk }} GiB"
       - "  Preset:   {{ crc_preset }}"
+      - "  Nota:     La version de OCP la determina"
+      - "            el bundle incluido en CRC"
       - "=========================================="
 
 - name: Validar recursos minimos del sistema
@@ -56,20 +53,6 @@
       Descargalo desde https://console.redhat.com/openshift/install/pull-secret
       y guardalo como {{ pull_secret_path }}
 
-- name: Verificar que libvirt esta instalado
-  ansible.builtin.command:
-    cmd: virsh --version
-  register: libvirt_check
-  changed_when: false
-  ignore_errors: true
-
-- name: Instalar dependencias de virtualizacion si es necesario
-  ansible.builtin.debug:
-    msg: >
-      AVISO: libvirt no detectado. CRC lo instalara automaticamente durante 'crc setup',
-      pero puede requerir permisos de sudo.
-  when: libvirt_check.rc != 0
-
 # === FASE 2: Descargar CRC ===
 
 - name: Crear directorio de binarios CRC
@@ -94,6 +77,7 @@
     url: "{{ crc_url }}"
     dest: "{{ crc_tmpdir.path }}/crc.tar.xz"
     mode: "0644"
+    timeout: 300
   when: not crc_stat.stat.exists
 
 - name: Descomprimir CRC
@@ -125,29 +109,19 @@
   ansible.builtin.debug:
     msg: "{{ crc_version_output.stdout }}"
 
-# === FASE 3: Configurar CRC ===
+# === FASE 3: Configurar y setup CRC ===
 
-- name: Ejecutar crc setup (puede tardar varios minutos)
-  ansible.builtin.command:
-    cmd: "{{ crc_binary }} setup"
-  register: crc_setup
-  changed_when: "'Setting up' in crc_setup.stdout"
-
-- name: Mostrar resultado de crc setup
-  ansible.builtin.debug:
-    var: crc_setup.stdout_lines
-
-- name: Configurar preset
+- name: Configurar preset antes del setup
   ansible.builtin.command:
     cmd: "{{ crc_binary }} config set preset {{ crc_preset }}"
   changed_when: false
 
-- name: Configurar CPUs minimas ({{ crc_cpus }})
+- name: Configurar CPUs ({{ crc_cpus }})
   ansible.builtin.command:
     cmd: "{{ crc_binary }} config set cpus {{ crc_cpus }}"
   changed_when: false
 
-- name: Configurar memoria minima ({{ crc_memory }} MiB)
+- name: Configurar memoria ({{ crc_memory }} MiB)
   ansible.builtin.command:
     cmd: "{{ crc_binary }} config set memory {{ crc_memory }}"
   changed_when: false
@@ -157,7 +131,7 @@
     cmd: "{{ crc_binary }} config set disk-size {{ crc_disk }}"
   changed_when: false
 
-- name: Desactivar cluster monitoring (ahorra recursos)
+- name: Desactivar cluster monitoring (ahorra ~2 GiB RAM)
   ansible.builtin.command:
     cmd: "{{ crc_binary }} config set enable-cluster-monitoring {{ crc_enable_cluster_monitoring | lower }}"
   changed_when: false
@@ -166,6 +140,25 @@
   ansible.builtin.command:
     cmd: "{{ crc_binary }} config set consent-telemetry no"
   changed_when: false
+
+- name: Comprobar si crc setup ya se ejecuto
+  ansible.builtin.stat:
+    path: "{{ ansible_env.HOME }}/.crc/bin/crc-driver-libvirt"
+  register: crc_setup_done
+
+- name: Ejecutar crc setup (descarga bundle ~4 GiB, puede tardar 5-10 min)
+  ansible.builtin.command:
+    cmd: "{{ crc_binary }} setup"
+  register: crc_setup
+  changed_when: true
+  when: not crc_setup_done.stat.exists
+  async: 900
+  poll: 30
+
+- name: Mostrar resultado de crc setup
+  ansible.builtin.debug:
+    var: crc_setup.stdout_lines
+  when: crc_setup is changed
 
 # === FASE 4: Arrancar el cluster ===
 
@@ -176,7 +169,7 @@
   changed_when: false
   ignore_errors: true
 
-- name: Arrancar CRC con OpenShift {{ ocp_version }} (puede tardar 10-15 minutos)
+- name: Arrancar CRC (puede tardar 10-15 minutos en el primer arranque)
   ansible.builtin.command:
     cmd: "{{ crc_binary }} start --pull-secret-file {{ pull_secret_path }}"
   register: crc_start
@@ -211,13 +204,13 @@
   register: crc_credentials
   changed_when: false
 
-- name: "RESULTADO FINAL - OpenShift Local {{ ocp_version }}"
+- name: "RESULTADO FINAL - OpenShift Local"
   ansible.builtin.debug:
     msg:
       - "============================================================"
       - "  CLUSTER OPENSHIFT LOCAL INSTALADO"
       - "============================================================"
-      - "  Version:    {{ ocp_version }} ({{ ocp_version_full }})"
+      - "  CRC:        {{ crc_version_output.stdout_lines[0] | default('') }}"
       - "  CPUs:       {{ crc_cpus }}"
       - "  Memoria:    {{ crc_memory }} MiB"
       - "  Disco:      {{ crc_disk }} GiB"

@@ -1,33 +1,33 @@
 apiVersion: v1
-baseDomain: {{ base_domain }}
+baseDomain: "{{ base_domain }}"
 metadata:
-  name: {{ cluster_name }}
+  name: "{{ cluster_name }}"
 compute:
   - hyperthreading: Enabled
     name: worker
     platform:
       aws:
-        type: {{ worker_instance_type }}
+        type: "{{ worker_instance_type }}"
     replicas: 0
 controlPlane:
   hyperthreading: Enabled
   name: master
   platform:
     aws:
-      type: {{ master_instance_type }}
+      type: "{{ master_instance_type }}"
   replicas: {{ master_count }}
 networking:
   clusterNetwork:
     - cidr: 10.128.0.0/14
       hostPrefix: 23
   machineNetwork:
-    - cidr: {{ vpc_cidr }}
+    - cidr: "{{ vpc_cidr }}"
   networkType: OVNKubernetes
   serviceNetwork:
     - 172.30.0.0/16
 platform:
   aws:
-    region: {{ aws_region }}
+    region: "{{ aws_region }}"
 publish: External
 pullSecret: '{{ pull_secret_content.content | b64decode | trim }}'
 sshKey: '{{ ssh_pub_key.content | b64decode | trim }}'

@@ -1,0 +1,53 @@
+---
+# === FASE 11: Esperar al bootstrap ===
+
+- name: Esperar a que el bootstrap complete
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/openshift-install wait-for bootstrap-complete --dir={{ install_dir }}/ocp --log-level=info"
+  environment: "{{ aws_env }}"
+  register: bootstrap_result
+  changed_when: false
+  async: "{{ bootstrap_timeout_seconds }}"
+  poll: "{{ bootstrap_poll_interval }}"
+  ignore_errors: true
+
+- name: Consultar estado de nodos durante bootstrap
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc get nodes --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig"
+  environment: "{{ aws_env }}"
+  register: nodes_status
+  changed_when: false
+  ignore_errors: true
+
+- name: Consultar estado de etcd durante bootstrap
+  ansible.builtin.command:
+    cmd: "{{ bin_dir }}/oc get pods -n openshift-etcd --kubeconfig={{ install_dir }}/ocp/auth/kubeconfig -o wide"
+  environment: "{{ aws_env }}"
+  register: etcd_status
+  changed_when: false
+  ignore_errors: true
+
+- name: "ESTADO BOOTSTRAP - {{ cluster_name }} {{ ocp_version }}"
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "  RESULTADO DEL BOOTSTRAP"
+      - "=========================================="
+      - "  Exito: {{ 'SI' if bootstrap_result.rc | default(1) == 0 else 'NO' }}"
+      - "=========================================="
+      - "  NODOS:"
+      - "{{ nodes_status.stdout | default('No disponible') }}"
+      - "=========================================="
+      - "  ETCD:"
+      - "{{ etcd_status.stdout | default('No disponible') }}"
+      - "=========================================="
+
+- name: Fallar si el bootstrap no completo
+  ansible.builtin.fail:
+    msg: >
+      El bootstrap no completo en el tiempo esperado.
+      Revisa el estado con:
+        export KUBECONFIG={{ install_dir }}/ocp/auth/kubeconfig
+        {{ bin_dir }}/oc get nodes
+        {{ bin_dir }}/oc get co
+  when: bootstrap_result.rc | default(1) != 0
